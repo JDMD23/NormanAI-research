@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "norman.research.sources.v1",
+  "note": "x_search accepts at most 20 handles per allowed_x_handles call. Lanes are searched separately so each stays under the cap.",
+  "xLanes": [
+    {
+      "id": "nyc_vc",
+      "label": "NYC venture accounts",
+      "allowedHandles": [
+        "unionsquareventures", "FirstMarkCap", "lererhippeau", "BoxGroup",
+        "primaryvc", "Bessemervp", "insightpartners", "ffvc",
+        "RRE", "Contour_VC", "notationcapital", "SusaVentures"
+      ],
+      "query": "New York City startup announcing a funding round, new NYC office, or NYC hiring push",
+      "windowDays": 7
+    },
+    {
+      "id": "nyc_press",
+      "label": "NYC tech press",
+      "allowedHandles": [
+        "builtinnyc", "TechCrunch", "AlleyWatch", "crainsnewyork",
+        "nypost", "Techmeme", "axios", "Fortune"
+      ],
+      "query": "New York City company office expansion, headquarters move, new Manhattan office, or funding round",
+      "windowDays": 7
+    },
+    {
+      "id": "founder_chatter",
+      "label": "Open founder chatter",
+      "allowedHandles": [],
+      "query": "Founders and operators posting that their New York City team outgrew its office, is opening a NYC office, is moving offices, or is hiring a head of workplace",
+      "windowDays": 14
+    },
+    {
+      "id": "cre_chatter",
+      "label": "NYC commercial real estate chatter",
+      "allowedHandles": [
+        "TheRealDeal", "CommercialObs", "Bisnow", "CoStarGroup"
+      ],
+      "query": "Manhattan office lease signed, tenant seeking space, sublease listed, or NYC office market tenant demand",
+      "windowDays": 14
+    }
+  ],
+  "webLanes": [
+    {
+      "id": "funding_nyc",
+      "label": "NYC funding announcements",
+      "query": "New York City headquartered startup raised Series A, Series B, or Series C in the last 14 days",
+      "windowDays": 14
+    },
+    {
+      "id": "office_moves",
+      "label": "NYC office moves and expansions",
+      "query": "company opening new New York City office OR relocating headquarters to Manhattan OR expanding NYC office space",
+      "windowDays": 30
+    },
+    {
+      "id": "workplace_hires",
+      "label": "Workplace / office leadership hires",
+      "query": "company hired Head of Workplace OR Director of Workplace Experience OR Office Manager in New York City",
+      "windowDays": 30
+    },
+    {
+      "id": "hiring_surge",
+      "label": "NYC hiring surges",
+      "query": "startup rapidly hiring in New York City, growing NYC team, dozens of open NYC roles",
+      "windowDays": 21
+    }
+  ],
+  "excludedHandles": [
+    "everydayinvestin", "cryptosignals", "pumpfun"
+  ]
+}

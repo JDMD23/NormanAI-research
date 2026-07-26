@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "norman.research.signals.v1",
+  "note": "Signal Strength is NOT Fit Score. Fit Score is owned by crm-core's scoring lane and must never be written from this repo. Signal Strength only decides whether a candidate is worth handing to intake at all.",
+  "signals": {
+    "nyc_office_opening": {
+      "weight": 30,
+      "meaning": "Company states it is opening, expanding, or relocating to a New York office.",
+      "examples": ["opening our NYC office", "expanding to New York", "moving to Manhattan"]
+    },
+    "outgrown_space": {
+      "weight": 28,
+      "meaning": "Explicit statement that current space is too small.",
+      "examples": ["we've outgrown our office", "bursting at the seams", "looking for more space"]
+    },
+    "funding_round": {
+      "weight": 25,
+      "meaning": "Priced round announced. Growth capital precedes headcount which precedes space.",
+      "minAmountUsd": 5000000,
+      "qualifyingTypes": ["Seed", "Series A", "Series B", "Series C", "Series D", "Growth"]
+    },
+    "workplace_hire": {
+      "weight": 22,
+      "meaning": "Hired a Head of Workplace / Office Manager / Head of Ops. Someone whose job is the office.",
+      "note": "Borrowed from sales-nav §10.9 — a better demand tell than headcount."
+    },
+    "hiring_surge": {
+      "weight": 18,
+      "meaning": "Material jump in NYC-based open roles.",
+      "minNycRoles": 5
+    },
+    "rto_mandate": {
+      "weight": 16,
+      "meaning": "Announced return-to-office or in-person policy change."
+    },
+    "headcount_growth": {
+      "weight": 12,
+      "meaning": "NYC-metro headcount climbing."
+    },
+    "lease_signal": {
+      "weight": 20,
+      "meaning": "Direct lease chatter — expiring lease, subleasing, space listed.",
+      "note": "Rare but the highest-intent signal when it appears."
+    },
+    "new_nyc_entity": {
+      "weight": 10,
+      "meaning": "New NY entity registration or NYC address first appearing."
+    }
+  },
+  "penalties": {
+    "no_nyc_proof": -40,
+    "excluded_industry": -100,
+    "stale_over_90d": -15,
+    "big_tech": -25,
+    "already_repped_hint": -20
+  },
+  "thresholds": {
+    "emit": 35,
+    "strong": 60,
+    "note": "emit = minimum to appear in the intake CSV. strong = worth telling JD about in the digest."
+  }
+}

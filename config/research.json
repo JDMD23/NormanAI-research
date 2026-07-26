@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "norman.research.v1",
+  "purpose": "Discovery arm. Finds NYC-area companies showing office-demand signals and hands them to NormanAI-crm-core intake. Never writes Notion.",
+  "downstream": {
+    "repo": "NormanAI-crm-core",
+    "contract": "docs/crm-core-operating-contract.md §7",
+    "writer": "scripts/crm_intake.py",
+    "note": "crm_intake.py is the ONLY Notion writer. Research emits CSV; intake dedups and creates."
+  },
+  "grok": {
+    "baseUrl": "https://api.x.ai/v1",
+    "endpoint": "/chat/completions",
+    "model": "grok-4-1-fast",
+    "apiKeyEnv": "XAI_API_KEY",
+    "tools": ["x_search", "web_search"],
+    "maxSearchResults": 25,
+    "temperature": 0,
+    "requestTimeoutSeconds": 240,
+    "maxRetries": 3,
+    "note": "Agent Tools API. The legacy search_parameters Live Search API was retired 2026-01-12 and returns 410. Run `python3 scripts/research_probe.py` to verify the live request shape before trusting a run."
+  },
+  "geography": {
+    "target": "NYC",
+    "nycProofRequired": true,
+    "acceptHq": ["NYC"],
+    "considerHq": ["Remote", "Other US", "International"],
+    "note": "considerHq companies are kept only when the signal itself is NYC-specific (e.g. 'opening a New York office')."
+  },
+  "caps": {
+    "maxCandidatesPerRun": 40,
+    "maxCandidatesPerLane": 25,
+    "maxSearchesPerRun": 12,
+    "minSignalStrength": 35,
+    "loopRestSeconds": 900,
+    "loopMaxBatches": 24
+  },
+  "exclusions": {
+    "industries": ["Biotech", "Therapeutics"],
+    "flagOnly": ["crypto", "blockchain", "web3", "NFT"],
+    "note": "Biotech/Therapeutics are hard-excluded per crm-core second-pass. Crypto terms are flagged in signal_notes, not dropped — the score agent owns that judgment."
+  },
+  "sink": {
+    "default": "csv",
+    "csv": {
+      "outDir": "out",
+      "filenamePattern": "research-intake-{date}.csv"
+    },
+    "supabase": {
+      "enabled": false,
+      "table": "research_candidates",
+      "urlEnv": "SUPABASE_URL",
+      "keyEnv": "SUPABASE_SERVICE_ROLE_KEY",
+      "migration": "sql/001_research_candidates.sql"
+    }
+  },
+  "dedup": {
+    "localStore": "state/research.db",
+    "checkNotionReadOnly": true,
+    "notionDatabaseId": "3a33930e-64f4-8002-ac6b-f5f99d632099",
+    "notionTokenEnv": "NOTION_TOKEN",
+    "note": "Notion read is a courtesy pre-filter to cut noise. crm_intake.py remains the authority on dedup."
+  }
+}

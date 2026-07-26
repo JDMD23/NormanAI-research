@@ -1,0 +1,74 @@
+name: Discovery run
+
+# Research is the only NormanAI lane that needs no logged-in browser — it talks
+# to the xAI API and nothing else. That is why it can run here instead of on
+# JD's Mac alongside the Crunchbase/LinkedIn/Careers lanes.
+#
+# This workflow produces the intake CSV as an artifact. It deliberately does NOT
+# write Notion: crm_intake.py in NormanAI-crm-core is the single writer, and
+# promoting a batch stays a human-triggered step.
+
+on:
+  schedule:
+    # 08:10 and 16:10 UTC on weekdays (≈04:10 / 12:10 ET).
+    - cron: "10 8,16 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Which lanes to run"
+        type: choice
+        options: ["all", "x", "web"]
+        default: "all"
+      dry_run:
+        description: "Dry run (no CSV emitted, nothing marked as sent)"
+        type: boolean
+        default: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The seen-store is what stops the same company being handed over twice.
+      # Without it every scheduled run re-emits the same board.
+      - name: Restore seen-store
+        uses: actions/cache@v4
+        with:
+          path: state/
+          key: research-state-${{ github.run_id }}
+          restore-keys: research-state-
+
+      - name: Probe the xAI API
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: python3 scripts/research_probe.py
+
+      - name: Run discovery
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python3 scripts/research_run.py --lane "${{ inputs.lane || 'all' }}" --dry-run
+          else
+            python3 scripts/research_run.py --lane "${{ inputs.lane || 'all' }}" --write --yes
+          fi
+
+      - name: Upload intake CSV and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-intake
+          path: |
+            out/
+            state/research_latest.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test deps
+        run: pip install pytest
+      - name: Run tests
+        run: python3 -m pytest tests/ -q
+      - name: Check configs parse
+        run: |
+          python3 -c "
+          import json, pathlib, sys
+          for p in sorted(pathlib.Path('config').glob('*.json')):
+              json.loads(p.read_text())
+              print('ok', p)
+          "
