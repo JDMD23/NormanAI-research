@@ -47,17 +47,16 @@ funding candidate on their own, with no keyword needed.
 
 ## Setup
 
-```bash
-export XAI_API_KEY=...          # required
-export NOTION_TOKEN=...         # optional: read-only pre-filter against the board
-```
+Two things, both covered in **`docs/setup.md`**:
 
-Or drop them in `.env` — same loader ladder as crm-core, so one file serves both.
-
-Verify the API before trusting a batch:
+1. An **xAI API key** from `console.x.ai` — *not* an X developer account, and
+   not the same as a Grok subscription. `x_search` reads X on xAI's side, which
+   is why no X API is needed.
+2. Your **Crunchbase saved search URL** pasted into `config/browse.json`.
 
 ```bash
-python3 scripts/research_probe.py
+echo 'XAI_API_KEY=xai-...' >> ~/.normanai/.env   # same .env ladder as crm-core
+python3 scripts/research_probe.py                # confirms the API, ~5 seconds
 ```
 
 ## Run

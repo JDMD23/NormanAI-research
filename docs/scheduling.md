@@ -35,7 +35,12 @@ and the rest:
 
 | Job id | Schedule (ET) | argv |
 |--------|---------------|------|
-| `research-daily` | `30 6 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+| `research-daily-am` | `30 6 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+| `research-daily-pm` | `0 13 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+
+Two runs a weekday, both lanes. The morning one matters most — it lands before
+the enrichment lanes wake up. The afternoon one catches anything that broke
+during the day.
 
 Working directory is the `NormanAI-research` checkout. It needs `XAI_API_KEY`
 and `NOTION_TOKEN` in the environment — the loader reads the same `.env` ladder
@@ -44,7 +49,8 @@ crm-core uses, so one file on the host serves both repos.
 Plain cron works too:
 
 ```cron
-30 6 * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
+30 6  * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
+0  13 * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
 ```
 
 **Exit codes:** `0` is a clean run — including a run that found nothing.
@@ -79,19 +85,27 @@ read-only pre-filter that skips companies already on the board).
 
 ---
 
-## More often than daily?
+## Adding more search sweeps
 
-`config/sources.json` documents a 5×/weekday cadence for the search lanes.
-That's a scheduling choice, not a code one — add more Codex entries pointing at
-`daily.py --no-browser --write --yes --promote` at 10:00 / 13:00 / 16:00 / 19:00
-and keep the full both-lane run at 06:30.
+The two runs above cover both lanes. If you want the *search* lanes to run more
+often than Crunchbase and Substack do, add entries that skip the browser:
 
-Keep the browser lane once a day. It's the slow, expensive half, and Crunchbase
-and Substack don't change fast enough to justify more.
+```
+research-sweep   0 10,16,19 * * 1-5   python3 scripts/daily.py --no-browser --write --yes --promote
+```
 
-**Cost:** `x_search` and `web_search` bill about $5 per 1,000 calls. Nine
-searches a run, five runs a weekday, is roughly 950 calls a month — under $5,
-plus tokens. `caps.maxSearchesPerRun` is the ceiling that keeps a runaway loop
+Three extra sweeps, no Chrome, no contention with the enrichment lanes.
+
+**Cost.** `x_search` and `web_search` bill about $5 per 1,000 calls, plus
+tokens. Nine searches a run:
+
+| Schedule | Calls/month | Search cost |
+|---|---|---|
+| 2 runs/weekday (both lanes) | ~380 | ~$2 |
+| 5 runs/weekday (+3 sweeps) | ~950 | ~$5 |
+
+The browser lane adds **no** search calls — extraction runs with tools disabled,
+so it only pays tokens. `caps.maxSearchesPerRun` is the ceiling that stops a bug
 from becoming a bill.
 
 ---

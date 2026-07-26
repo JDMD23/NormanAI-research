@@ -1,37 +1,34 @@
 {
   "schemaVersion": "norman.research.browse.v1",
-  "note": "Sources that need JD's logged-in Chrome. The browser gets past the paywall; Grok reads the page. Add a URL here and it runs — no code change.",
-
+  "note": "Sources that need JD's logged-in Chrome. The browser gets past the paywall; Grok reads the page. Add a URL here and it runs \u2014 no code change.",
   "settleSeconds": 3.0,
   "restBetweenPagesSeconds": 6.0,
   "maxPagesPerRun": 12,
-
   "sources": [
     {
       "id": "cb_nyc_rounds",
       "enabled": true,
-      "label": "Crunchbase — recent NYC funding rounds",
+      "label": "Crunchbase \u2014 saved search: NormanAI-research",
       "mode": "funding",
       "multiMode": false,
       "limit": 20,
       "url": "https://www.crunchbase.com/discover/funding_rounds",
-      "note": "DISCOVERY ONLY — finds companies not yet on the board. Enrichment of existing companies stays with crm-core's crm_crunchbase_agent.py; this lane must never write funding fields it owns. Replace this URL with your own saved Crunchbase search (NYC + last 30 days + Series A-C) and paste it here."
+      "note": "PASTE YOUR SAVED SEARCH URL HERE \u2014 the placeholder above is a generic discover page and will return noise. Build the search on crunchbase.com (New York + last 30 days + Series A-C), save it as 'NormanAI-research', then copy the URL from the address bar. DISCOVERY ONLY: enrichment of companies already on the board stays with crm-core's crm_crunchbase_agent.py, so this lane must never write the funding fields that agent owns."
     },
     {
       "id": "cb_nyc_companies",
       "enabled": false,
-      "label": "Crunchbase — NYC company search",
+      "label": "Crunchbase \u2014 second saved search",
       "mode": "funding",
       "multiMode": false,
       "limit": 20,
       "url": "https://www.crunchbase.com/discover/organization.companies",
-      "note": "Enable once you have a saved search URL worth running daily."
+      "note": "A second angle: wider date range, or Seed + Series A only. Paste its URL and flip enabled to true."
     },
-
     {
       "id": "substack_inbox",
       "enabled": true,
-      "label": "Substack — your subscribed inbox",
+      "label": "Substack \u2014 your subscribed inbox",
       "mode": "funding",
       "multiMode": true,
       "limit": 15,
@@ -41,12 +38,20 @@
     {
       "id": "substack_notes",
       "enabled": false,
-      "label": "Substack — notes feed",
+      "label": "Substack \u2014 notes feed",
       "mode": "funding",
       "multiMode": true,
       "limit": 10,
       "url": "https://substack.com/notes",
       "note": "Noisier than the inbox. Turn on if the inbox lane proves worth it."
     }
-  ]
+  ],
+  "cadence": {
+    "runsPerDay": 2,
+    "timesEastern": [
+      "06:30",
+      "13:00"
+    ],
+    "note": "Crunchbase saved searches twice a weekday. The browser lane costs no search calls \u2014 only tokens \u2014 so the limit is Chrome's time, not budget."
+  }
 }
