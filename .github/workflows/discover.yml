@@ -10,8 +10,11 @@ name: Discovery run
 
 on:
   schedule:
-    # 08:10 and 16:10 UTC on weekdays (≈04:10 / 12:10 ET).
-    - cron: "10 8,16 * * 1-5"
+    # 06:30, 10:00, 13:00, 16:00, 19:00 ET → UTC-4 (EDT).
+    # NOTE: cron is fixed-UTC, so these shift by an hour under EST. That is
+    # acceptable for a discovery sweep; do not "fix" it with a second schedule.
+    - cron: "30 10 * * 1-5"
+    - cron: "0 14,17,20,23 * * 1-5"
   workflow_dispatch:
     inputs:
       lane:

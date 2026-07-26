@@ -1,45 +1,58 @@
 {
-  "schemaVersion": "norman.research.signals.v1",
-  "note": "Signal Strength is NOT Fit Score. Fit Score is owned by crm-core's scoring lane and must never be written from this repo. Signal Strength only decides whether a candidate is worth handing to intake at all.",
+  "schemaVersion": "norman.research.signals.v2",
+  "note": "Signal Strength is NOT Fit Score. Fit Score is owned by crm-core's scoring lane and must never be written from this repo. Signal Strength is the FALLBACK triage gate used when crm-core's real scorer is unreachable; when it is reachable, predicted fit governs.",
+  "reweightedBecause": "crm-core's fit weights put 55 of 100 points on NYC heads + NYC jobs, and only 10 on funding. v1 of this file weighted funding at 25 and treated it as a fit signal. It is a timing signal. Weights below now track the real model.",
   "signals": {
-    "nyc_office_opening": {
+    "nyc_headcount_visible": {
       "weight": 30,
+      "meaning": "A source states the size of the company's New York team.",
+      "note": "Maps to the highest-weighted fit component (NYC Heads, 30 pts). The single best thing research can find."
+    },
+    "hiring_surge": {
+      "weight": 28,
+      "meaning": "Material number of open roles located in NYC.",
+      "minNycRoles": 5,
+      "note": "Maps to NYC Jobs, 25 pts."
+    },
+    "nyc_office_opening": {
+      "weight": 26,
       "meaning": "Company states it is opening, expanding, or relocating to a New York office.",
       "examples": ["opening our NYC office", "expanding to New York", "moving to Manhattan"]
     },
     "outgrown_space": {
-      "weight": 28,
+      "weight": 26,
       "meaning": "Explicit statement that current space is too small.",
-      "examples": ["we've outgrown our office", "bursting at the seams", "looking for more space"]
-    },
-    "funding_round": {
-      "weight": 25,
-      "meaning": "Priced round announced. Growth capital precedes headcount which precedes space.",
-      "minAmountUsd": 5000000,
-      "qualifyingTypes": ["Seed", "Series A", "Series B", "Series C", "Series D", "Growth"]
+      "examples": ["we've outgrown our office", "bursting at the seams", "leaving WeWork for our own space", "moved three times in two years"]
     },
     "workplace_hire": {
       "weight": 22,
-      "meaning": "Hired a Head of Workplace / Office Manager / Head of Ops. Someone whose job is the office.",
-      "note": "Borrowed from sales-nav §10.9 — a better demand tell than headcount."
-    },
-    "hiring_surge": {
-      "weight": 18,
-      "meaning": "Material jump in NYC-based open roles.",
-      "minNycRoles": 5
-    },
-    "rto_mandate": {
-      "weight": 16,
-      "meaning": "Announced return-to-office or in-person policy change."
-    },
-    "headcount_growth": {
-      "weight": 12,
-      "meaning": "NYC-metro headcount climbing."
+      "meaning": "Hired a Head of Workplace / Facilities / Office Manager / Head of Ops. Someone whose job is the office.",
+      "note": "From sales-nav §10.9 — a better demand tell than headcount alone."
     },
     "lease_signal": {
       "weight": 20,
       "meaning": "Direct lease chatter — expiring lease, subleasing, space listed.",
       "note": "Rare but the highest-intent signal when it appears."
+    },
+    "headcount_growth": {
+      "weight": 18,
+      "meaning": "Headcount climbing — doubled, tripled, or a stated milestone (20/50/100)."
+    },
+    "rto_mandate": {
+      "weight": 16,
+      "meaning": "Announced return-to-office, in-person, or hybrid policy change."
+    },
+    "arr_valuation_growth": {
+      "weight": 14,
+      "meaning": "Sharp ARR growth, a new valuation, or unicorn status.",
+      "note": "Growth proxy when headcount isn't stated. Still not a fit signal on its own."
+    },
+    "funding_round": {
+      "weight": 12,
+      "meaning": "Priced round announced. Tells you WHEN a company will grow, not whether it is a good lead.",
+      "minAmountUsd": 5000000,
+      "qualifyingTypes": ["Seed", "Series A", "Series B", "Series C", "Series D", "Growth"],
+      "note": "Deliberately down-weighted from v1's 25. Funding is 10 of 100 in the real fit model."
     },
     "new_nyc_entity": {
       "weight": 10,
@@ -56,6 +69,6 @@
   "thresholds": {
     "emit": 35,
     "strong": 60,
-    "note": "emit = minimum to appear in the intake CSV. strong = worth telling JD about in the digest."
+    "note": "Fallback gate only — used when crm-core's scorer is unreachable. See config/research.json → gate."
   }
 }

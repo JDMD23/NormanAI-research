@@ -119,6 +119,45 @@ def push_supabase(candidates: list[Candidate]) -> int:
     return len(rows)
 
 
+def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
+    """Hand the CSV to crm-core's crm_intake.py and let it create the rows.
+
+    This is how research "automatically adds to CRM Core" without becoming a
+    second Notion writer: we invoke the one writer rather than reimplementing
+    it. Intake keeps its hard dedup, its Need-* seeding, and its receipt.
+    """
+    import subprocess
+
+    from lib.fit_bridge import crm_core_path
+
+    core = crm_core_path()
+    script = core / "scripts" / "crm_intake.py"
+    if not script.exists():
+        raise SinkError(
+            f"crm_intake.py not found at {script}. Promotion needs the "
+            "NormanAI-crm-core checkout — set crmCore.path in config/research.json."
+        )
+
+    cmd = ["python3", str(script), "--csv", str(csv_path)]
+    cmd += ["--dry-run"] if dry_run else ["--write", "--yes"]
+
+    proc = subprocess.run(
+        cmd, cwd=str(core), capture_output=True, text=True, timeout=900
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        raise SinkError(f"crm_intake.py failed ({proc.returncode}): {out[-1500:]}")
+
+    # Intake writes its own receipt; surface it rather than reparsing stdout.
+    receipt = core / "state" / "intake_latest.json"
+    summary: dict[str, Any] = {"stdout": out[-4000:], "receipt": str(receipt)}
+    try:
+        summary["counts"] = json.loads(receipt.read_text()).get("counts")
+    except (OSError, json.JSONDecodeError):
+        summary["counts"] = None
+    return summary
+
+
 def notion_existing_keys() -> set[str]:
     """Read-only pre-filter: identity keys already on the CRM Core board.
 

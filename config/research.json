@@ -7,6 +7,24 @@
     "writer": "scripts/crm_intake.py",
     "note": "crm_intake.py is the ONLY Notion writer. Research emits CSV; intake dedups and creates."
   },
+  "crmCore": {
+    "path": "../NormanAI-crm-core",
+    "scorer": "scripts/fit_score.py",
+    "intake": "scripts/crm_intake.py",
+    "note": "Research calls crm-core's REAL fit scorer via subprocess to predict how a candidate would score. Never reimplement the bands here — a drifting second copy is worse than no prediction."
+  },
+  "gate": {
+    "mode": "predicted_fit",
+    "minPredictedFit": 55,
+    "minSignalStrengthFallback": 35,
+    "note": "Prospect threshold is 60 in crm-core. We gate at 55 because research estimates NYC heads/jobs rather than measuring them, and the lanes routinely revise upward. Below this, a company would land at Needs Review and cost JD attention for nothing. If the scorer is unreachable, fall back to signal strength and say so in the receipt."
+  },
+  "promote": {
+    "enabled": false,
+    "maxPerRun": 10,
+    "requireNycEstimate": true,
+    "note": "When enabled (or --promote passed), research invokes crm-core's crm_intake.py directly so discovered companies land on the board without a human step. Capped per run so a bad batch is a small mess, not a big one. requireNycEstimate means a candidate with no NYC headcount OR roles estimate is emitted to CSV but not auto-promoted."
+  },
   "grok": {
     "baseUrl": "https://api.x.ai/v1",
     "endpoint": "/chat/completions",

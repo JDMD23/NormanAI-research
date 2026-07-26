@@ -1,4 +1,10 @@
 from lib.candidates import Candidate, response_schema, score
+from lib.config import signals_config
+
+# Derived, not hardcoded: reweighting config is a routine tuning action and
+# should not break the suite. What must hold is the arithmetic and the rules.
+W = {name: spec["weight"] for name, spec in signals_config()["signals"].items()}
+P = signals_config()["penalties"]
 
 
 def make(**kw) -> Candidate:
@@ -9,8 +15,18 @@ def make(**kw) -> Candidate:
 
 def test_signals_accumulate():
     cand = score(make(signals=["nyc_office_opening", "hiring_surge"]))
-    assert cand.signal_strength == 48  # 30 + 18
+    assert cand.signal_strength == W["nyc_office_opening"] + W["hiring_surge"]
     assert any("nyc_office_opening" in n for n in cand.score_notes)
+
+
+def test_nyc_people_signals_outrank_funding():
+    """The whole point of v2: crm-core scores NYC heads/jobs at 55 of 100 and
+    funding at 10. The signal weights must not contradict the real model."""
+    assert W["nyc_headcount_visible"] > W["funding_round"]
+    assert W["hiring_surge"] > W["funding_round"]
+    assert W["nyc_headcount_visible"] >= max(
+        W[s] for s in W if s not in {"nyc_headcount_visible"}
+    )
 
 
 def test_missing_nyc_proof_is_heavily_penalised():
@@ -24,14 +40,14 @@ def test_small_funding_round_does_not_count():
     small = score(make(signals=["funding_round"], last_funding_usd=1_000_000))
     big = score(make(signals=["funding_round"], last_funding_usd=20_000_000))
     assert small.signal_strength == 0
-    assert big.signal_strength == 25
+    assert big.signal_strength == W["funding_round"]
     assert any("threshold" in n for n in small.score_notes)
 
 
 def test_funding_with_unknown_amount_still_counts():
     """Unknown ≠ 0: a round we can't size shouldn't be treated as a tiny round."""
     cand = score(make(signals=["funding_round"], last_funding_usd=None))
-    assert cand.signal_strength == 25
+    assert cand.signal_strength == W["funding_round"]
 
 
 def test_excluded_industry_is_zeroed():
@@ -53,7 +69,7 @@ def test_score_is_clamped_to_100():
 
 def test_unknown_signal_is_ignored_not_fatal():
     cand = score(make(signals=["nyc_office_opening", "made_up_signal"]))
-    assert cand.signal_strength == 30
+    assert cand.signal_strength == W["nyc_office_opening"]
     assert any("unknown signal" in n for n in cand.score_notes)
 
 

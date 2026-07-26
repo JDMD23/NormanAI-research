@@ -9,6 +9,7 @@ import json
 import pytest
 
 from lib import discover, grok
+from lib.config import signals_config
 
 
 def fake_response(candidates: list[dict]) -> dict:
@@ -42,7 +43,8 @@ def test_lane_returns_scored_candidates(monkeypatch):
     cand = result["candidates"][0]
     assert cand.company == "Acme"
     assert cand.lane == "test_lane"
-    assert cand.signal_strength == 55  # 30 + 25, NYC proof present
+    weights = {n: s["weight"] for n, s in signals_config()["signals"].items()}
+    assert cand.signal_strength == weights["nyc_office_opening"] + weights["funding_round"]
     assert result["usage"]["sources_used"] == 3
 
 

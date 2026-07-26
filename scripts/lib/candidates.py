@@ -93,6 +93,18 @@ def response_schema() -> dict[str, Any]:
                             "type": ["string", "null"],
                             "description": "Concrete evidence of NYC presence or intent. Null when there is none — never guess.",
                         },
+                        "nyc_headcount_estimate": {
+                            "type": ["integer", "null"],
+                            "description": "Approximate people based in the NYC metro. Null unless a source states or strongly implies it. This is the single most important field — do not guess it.",
+                        },
+                        "nyc_open_roles_estimate": {
+                            "type": ["integer", "null"],
+                            "description": "Approximate open roles located in NYC. Null unless a source states or strongly implies it.",
+                        },
+                        "nyc_estimate_basis": {
+                            "type": ["string", "null"],
+                            "description": "Where the two NYC numbers came from. Required if either is non-null.",
+                        },
                         "signals": {
                             "type": "array",
                             "items": {"type": "string", "enum": signal_names},
@@ -125,12 +137,22 @@ class Candidate:
     num_rounds: int | None = None
     investors: str = ""
     nyc_proof: str = ""
+    # The two inputs worth 55 of crm-core's 100 fit points. Research can only
+    # estimate them; the LinkedIn and Careers lanes measure them properly and
+    # overwrite. Estimates exist to triage, never to be written to Notion.
+    nyc_headcount_estimate: int | None = None
+    nyc_open_roles_estimate: int | None = None
+    nyc_estimate_basis: str = ""
     signals: list[str] = field(default_factory=list)
     signal_notes: str = ""
     source_urls: list[str] = field(default_factory=list)
     lane: str = ""
     signal_strength: int = 0
     score_notes: list[str] = field(default_factory=list)
+    predicted_fit: int | None = None
+    predicted_fit_reason: str = ""
+    predicted_fit_flags: list[str] = field(default_factory=list)
+    predicted_fit_components: dict = field(default_factory=dict)
 
     @classmethod
     def from_model(cls, raw: dict[str, Any], lane: str = "") -> "Candidate":
@@ -147,11 +169,16 @@ class Candidate:
             except (TypeError, ValueError):
                 return None
 
-        rounds = raw.get("num_rounds")
-        try:
-            rounds_int = int(rounds) if rounds not in (None, "") else None
-        except (TypeError, ValueError):
-            rounds_int = None
+        def i(key: str) -> int | None:
+            val = raw.get(key)
+            if val in (None, ""):
+                return None
+            try:
+                return int(float(val))
+            except (TypeError, ValueError):
+                return None
+
+        rounds_int = i("num_rounds")
 
         return cls(
             company=s("company"),
@@ -171,6 +198,9 @@ class Candidate:
             num_rounds=rounds_int,
             investors=s("investors"),
             nyc_proof=s("nyc_proof"),
+            nyc_headcount_estimate=i("nyc_headcount_estimate"),
+            nyc_open_roles_estimate=i("nyc_open_roles_estimate"),
+            nyc_estimate_basis=s("nyc_estimate_basis"),
             signals=[str(x) for x in (raw.get("signals") or [])],
             signal_notes=s("signal_notes"),
             source_urls=[str(u) for u in (raw.get("source_urls") or []) if str(u).startswith("http")],
@@ -204,12 +234,19 @@ class Candidate:
             "num_rounds": self.num_rounds,
             "investors": self.investors,
             "nyc_proof": self.nyc_proof,
+            "nyc_headcount_estimate": self.nyc_headcount_estimate,
+            "nyc_open_roles_estimate": self.nyc_open_roles_estimate,
+            "nyc_estimate_basis": self.nyc_estimate_basis,
             "signals": self.signals,
             "signal_notes": self.signal_notes,
             "source_urls": self.source_urls,
             "lane": self.lane,
             "signal_strength": self.signal_strength,
             "score_notes": self.score_notes,
+            "predicted_fit": self.predicted_fit,
+            "predicted_fit_reason": self.predicted_fit_reason,
+            "predicted_fit_flags": self.predicted_fit_flags,
+            "predicted_fit_components": self.predicted_fit_components,
             "identity_key": self.key,
         }
 

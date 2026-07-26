@@ -7,6 +7,7 @@ from lib.sinks import write_intake_csv
 def test_dedupe_within_merges_evidence_and_keeps_strongest():
     from research_run import dedupe_within
 
+    # One signal vs two, so "strongest" holds regardless of how weights are tuned.
     weak = score(Candidate(
         company="Acme Inc",
         website="https://acme.com",
@@ -19,10 +20,11 @@ def test_dedupe_within_merges_evidence_and_keeps_strongest():
         company="Acme Technologies",
         website="http://www.acme.com/about",
         nyc_proof="Opening a Manhattan office",
-        signals=["nyc_office_opening"],
+        signals=["hiring_surge", "nyc_office_opening"],
         source_urls=["https://b.example"],
         lane="funding_nyc",
     ))
+    assert strong.signal_strength > weak.signal_strength
 
     merged = dedupe_within([weak, strong])
     assert len(merged) == 1

@@ -105,7 +105,59 @@ run is 8 lanes = 8 search calls plus tokens. At the default twice-daily weekday
 schedule that is ~350 search calls a month — a couple of dollars. `maxSearchesPerRun`
 is the ceiling that keeps a runaway loop from becoming a bill.
 
-## 9. Hard forbidden
+## 9. Targeting is delegated, not duplicated
+
+Research predicts a candidate's Fit Score by running crm-core's real
+`fit_score.py` as a subprocess against the real `fit-score-weights.json`. It
+does not reimplement the bands.
+
+This matters more than it looks. The alternative — a second copy of the scoring
+logic living here — would drift the first time JD retunes a weight, and the
+drift would be silent: research would keep sourcing against last month's
+definition of a good company while the board scored against this month's. A
+prediction that is confidently wrong is worse than no prediction.
+
+Consequences to keep in mind:
+
+- Research supplies **estimates** for NYC heads and NYC jobs. They exist to
+  triage and are never written to Notion — the LinkedIn and Careers lanes own
+  those fields and measure them properly.
+- With two of (heads, jobs, funding date) missing, the engine applies its
+  `dataBlindCap` of 70. Most research-stage predictions are therefore ceilings,
+  not verdicts. Gate at 55 rather than the 60 Prospect threshold to leave room
+  for the lanes to revise upward.
+- If crm-core is unreachable, `fit_bridge.apply()` degrades to signal strength
+  and **says so in the receipt and on stdout**. A silent gate switch would be
+  the worst possible failure here.
+
+## 10. Automatic promotion and where it runs
+
+`--promote` invokes `crm_intake.py`. Research calls the writer; it does not
+become one. Section 2 still holds in full.
+
+Promotion needs three things co-located: this repo, the crm-core checkout, and
+`NOTION_TOKEN`. That is JD's Mac, where the Codex scheduler already runs the
+other lanes — so the full discover→promote loop belongs in the Codex registry,
+alongside `crm-core-crunchbase` and friends:
+
+| Job id | argv |
+|--------|------|
+| `research-discover` | `python3 scripts/research_run.py --write --yes --promote` |
+
+CI keeps running discovery **without** `--promote`, as a dry sweep that uploads
+a CSV artifact. That gives a free canary: if the Action's candidates look wrong,
+the board hasn't been touched.
+
+Guards on promotion, in order:
+
+1. predicted fit ≥ `gate.minPredictedFit`
+2. `promote.requireNycEstimate` — no NYC numbers, no auto-add
+3. `promote.maxPerRun` — a bad batch is a small mess
+4. `crm_intake.py`'s hard dedup — the final authority
+5. everything lands at `Status=Research`, a machine status, so the score agent
+   can exit it without touching anything JD owns
+
+## 11. Hard forbidden
 
 - Writing Notion from this repo
 - Writing Fit Score, Status, Top Pursuit, Priority, or any field crm-core lists

@@ -22,6 +22,28 @@ Search task: {query}
 
 Look at the last {window_days} days.
 
+WHAT ACTUALLY MATTERS (this is the client's real scoring model, not a guess):
+  - People based in NYC ........... 30% of the score
+  - Open roles located in NYC ..... 25%
+  - Trajectory (age x NYC x stage)  20%
+  - Industry ...................... 10%  AI/agents best; then fintech,
+                                         cybersecurity, healthtech, devtools,
+                                         data/infra, automation, proptech
+  - Total funding ................. 10%
+  - Investor quality ...............  5%
+
+So a 60-person NYC team with 12 open NYC roles beats a company that just raised
+$100M but has four people in New York. Funding is a TIMING signal — it tells you
+when a company is about to grow — it is not what makes a company a good lead.
+Chase the NYC people. Always.
+
+Because of that, `nyc_headcount_estimate` and `nyc_open_roles_estimate` are the
+two most valuable fields you can fill. Fill them ONLY from something a source
+actually says or strongly implies — a careers page showing NYC roles, a stated
+team size, "our 40-person New York team". Put where the numbers came from in
+`nyc_estimate_basis`. If you are inferring rather than reading, leave them null.
+A null costs the client nothing; a wrong number silently mis-ranks the company.
+
 What counts as a lead — the signals you may report:
 {signal_list}
 
@@ -38,8 +60,10 @@ Hard rules, in priority order:
 6. `source_urls` must be links you actually used. No links, no candidate.
 7. Prefer companies between roughly 20 and 1000 employees. Enormous public
    companies and 3-person pre-seed teams are both out of scope.
+8. Prefer companies founded within the last ~8 years. Older companies with a
+   small NYC presence score near zero for this client.
 
-Return at most {limit} companies, strongest signal first.
+Return at most {limit} companies, strongest NYC presence first.
 """
 
 

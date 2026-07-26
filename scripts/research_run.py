@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from lib import state  # noqa: E402
+from lib import fit_bridge, state  # noqa: E402
 from lib.candidates import Candidate  # noqa: E402
 from lib.config import load_env_key, research_config  # noqa: E402
 from lib.discover import run_lane, web_lanes, x_lanes  # noqa: E402
@@ -38,6 +38,7 @@ from lib.identity import hard_match  # noqa: E402
 from lib.sinks import (  # noqa: E402
     SinkError,
     notion_existing_keys,
+    promote_via_intake,
     push_supabase,
     write_evidence,
     write_intake_csv,
@@ -113,15 +114,36 @@ def dedupe_within(candidates: list[Candidate]) -> list[Candidate]:
 def one_pass(args: argparse.Namespace) -> dict:
     cfg = research_config()
     caps = cfg["caps"]
-    threshold = args.min_strength if args.min_strength is not None else caps["minSignalStrength"]
+    gate_cfg = cfg["gate"]
 
     print(f"== discovery pass ({args.lane}) ==", flush=True)
     found, reports = collect(args.lane)
     print(f"raw candidates: {len(found)}", flush=True)
 
     merged = dedupe_within(found)
-    strong = [c for c in merged if c.signal_strength >= threshold]
+
+    # Rank with crm-core's real scorer where we can, so research targets what
+    # JD's weights actually reward rather than what looks exciting in a tweet.
+    merged, fit_note = fit_bridge.apply(merged)
+    print(f"fit: {fit_note}", flush=True)
+
+    using_predicted = any(c.predicted_fit is not None for c in merged)
+    if using_predicted:
+        threshold = (
+            args.min_fit if args.min_fit is not None else gate_cfg["minPredictedFit"]
+        )
+        strong = [c for c in merged if (c.predicted_fit or 0) >= threshold]
+        gate_name = f"predicted_fit>={threshold}"
+    else:
+        threshold = (
+            args.min_strength
+            if args.min_strength is not None
+            else gate_cfg["minSignalStrengthFallback"]
+        )
+        strong = [c for c in merged if c.signal_strength >= threshold]
+        gate_name = f"signal_strength>={threshold} (fallback)"
     weak = len(merged) - len(strong)
+    print(f"gate: {gate_name} — {len(strong)} pass, {weak} held", flush=True)
 
     known = notion_existing_keys() if not args.no_notion_check else set()
     if known:
@@ -146,7 +168,11 @@ def one_pass(args: argparse.Namespace) -> dict:
                 continue
             fresh.append(cand)
 
-        fresh.sort(key=lambda c: c.signal_strength, reverse=True)
+        fresh.sort(
+            key=lambda c: (c.predicted_fit if c.predicted_fit is not None else -1,
+                           c.signal_strength),
+            reverse=True,
+        )
         over_cap = max(0, len(fresh) - caps["maxCandidatesPerRun"])
         fresh = fresh[: caps["maxCandidatesPerRun"]]
         if over_cap:
@@ -161,6 +187,8 @@ def one_pass(args: argparse.Namespace) -> dict:
             "ran_at": datetime.now(timezone.utc).isoformat(),
             "mode": "write" if args.write else "dry_run",
             "lane": args.lane,
+            "gate": gate_name,
+            "fit_note": fit_note,
             "threshold": threshold,
             "counts": {
                 "raw": len(found),
@@ -195,19 +223,65 @@ def one_pass(args: argparse.Namespace) -> dict:
                     outcome["supabase_error"] = str(exc)
                     print(f"! supabase sink failed: {exc}", flush=True)
 
-            print(
-                "\nnext (in NormanAI-crm-core):\n"
-                f"  python3 scripts/crm_intake.py --csv {csv_path} --dry-run\n"
-                f"  python3 scripts/crm_intake.py --csv {csv_path} --write --yes",
-                flush=True,
-            )
+            promote_cfg = cfg["promote"]
+            if args.promote or promote_cfg.get("enabled"):
+                promotable = fresh
+                if promote_cfg.get("requireNycEstimate"):
+                    promotable = [
+                        c for c in fresh
+                        if c.nyc_headcount_estimate is not None
+                        or c.nyc_open_roles_estimate is not None
+                    ]
+                    skipped = len(fresh) - len(promotable)
+                    if skipped:
+                        print(
+                            f"promote: {skipped} held back — no NYC headcount or "
+                            "roles estimate (still in the CSV for review)",
+                            flush=True,
+                        )
+                cap = promote_cfg.get("maxPerRun", 10)
+                if len(promotable) > cap:
+                    print(
+                        f"promote: capping {len(promotable)} → {cap} (promote.maxPerRun)",
+                        flush=True,
+                    )
+                    promotable = promotable[:cap]
+
+                if promotable:
+                    promote_csv = write_intake_csv(
+                        promotable, csv_path.with_name(csv_path.stem + "-promote.csv")
+                    )
+                    try:
+                        summary = promote_via_intake(promote_csv)
+                        outcome["promote"] = summary["counts"]
+                        print(
+                            f"\npromoted {len(promotable)} → crm_intake.py: "
+                            f"{json.dumps(summary['counts'])}",
+                            flush=True,
+                        )
+                    except SinkError as exc:
+                        outcome["promote_error"] = str(exc)
+                        print(f"! promotion failed: {exc}", flush=True)
+                else:
+                    print("promote: nothing eligible this pass", flush=True)
+            else:
+                print(
+                    "\nnext (in NormanAI-crm-core):\n"
+                    f"  python3 scripts/crm_intake.py --csv {csv_path} --dry-run\n"
+                    f"  python3 scripts/crm_intake.py --csv {csv_path} --write --yes",
+                    flush=True,
+                )
         elif fresh:
             print(f"\nDRY RUN — {len(fresh)} candidates would be emitted:", flush=True)
             for cand in fresh:
-                proof = cand.nyc_proof[:70] if cand.nyc_proof else "(no NYC proof)"
+                proof = cand.nyc_proof[:60] if cand.nyc_proof else "(no NYC proof)"
+                fit = "--" if cand.predicted_fit is None else f"{cand.predicted_fit:>3}"
+                heads = cand.nyc_headcount_estimate
+                roles = cand.nyc_open_roles_estimate
+                nyc = f"{heads if heads is not None else '?'}h/{roles if roles is not None else '?'}r"
                 print(
-                    f"  [{cand.signal_strength:>3}] {cand.company} — "
-                    f"{', '.join(cand.signals) or 'no signals'} — {proof}",
+                    f"  fit={fit} sig={cand.signal_strength:>3} {nyc:>9}  "
+                    f"{cand.company} — {', '.join(cand.signals) or 'no signals'} — {proof}",
                     flush=True,
                 )
         else:
@@ -268,7 +342,12 @@ def main() -> int:
     parser.add_argument("--write", action="store_true", help="emit the intake CSV")
     parser.add_argument("--yes", action="store_true", help="required with --write")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--min-strength", type=int, default=None)
+    parser.add_argument("--min-fit", type=int, default=None,
+                        help="override the predicted-fit gate")
+    parser.add_argument("--min-strength", type=int, default=None,
+                        help="override the fallback signal-strength gate")
+    parser.add_argument("--promote", action="store_true",
+                        help="hand the CSV straight to crm-core's crm_intake.py")
     parser.add_argument("--no-notion-check", action="store_true",
                         help="skip the read-only CRM Core pre-filter")
     parser.add_argument("--loop", action="store_true")
@@ -280,6 +359,8 @@ def main() -> int:
         raise SystemExit("--write requires --yes")
     if args.write and args.dry_run:
         raise SystemExit("use either --write or --dry-run")
+    if args.promote and not args.write:
+        raise SystemExit("--promote requires --write --yes (it creates CRM rows)")
 
     # Preflight: a missing key should fail before any lane runs, not halfway
     # through a pass with partial state written.

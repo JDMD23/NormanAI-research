@@ -1,33 +1,45 @@
 {
-  "schemaVersion": "norman.research.sources.v1",
-  "note": "x_search accepts at most 20 handles per allowed_x_handles call. Lanes are searched separately so each stays under the cap.",
+  "schemaVersion": "norman.research.sources.v2",
+  "note": "x_search accepts at most 20 handles per allowed_x_handles call, and allowed/excluded are mutually exclusive. Lanes are split so each stays under the cap and keeps a single search intent.",
+  "cadence": {
+    "runsPerDay": 5,
+    "timesEastern": ["06:30", "10:00", "13:00", "16:00", "19:00"],
+    "note": "JD's brainstorm cadence. x_search bills ~$5/1k calls, so 5 runs x ~9 lanes is a few dollars a month."
+  },
   "xLanes": [
     {
-      "id": "nyc_vc",
-      "label": "NYC venture accounts",
+      "id": "jd_watchlist",
+      "label": "JD's permanent account watchlist",
       "allowedHandles": [
-        "unionsquareventures", "FirstMarkCap", "lererhippeau", "BoxGroup",
-        "primaryvc", "Bessemervp", "insightpartners", "ffvc",
-        "RRE", "Contour_VC", "notationcapital", "SusaVentures"
+        "arfurgrok", "healthcareaiguy", "fundable_ai", "raisingfi",
+        "yoramdw", "paraformtalent", "dealwire_", "harmonic_ai",
+        "nextplayso", "arfurrock"
       ],
-      "query": "New York City startup announcing a funding round, new NYC office, or NYC hiring push",
-      "windowDays": 7
+      "query": "Companies growing their New York City team, opening or expanding a NYC office, hiring in New York, or announcing funding that will fund NYC headcount",
+      "windowDays": 3
     },
     {
       "id": "nyc_press",
       "label": "NYC tech press",
       "allowedHandles": [
         "builtinnyc", "TechCrunch", "AlleyWatch", "crainsnewyork",
-        "nypost", "Techmeme", "axios", "Fortune"
+        "Techmeme", "axios", "Fortune", "nypost"
       ],
-      "query": "New York City company office expansion, headquarters move, new Manhattan office, or funding round",
+      "query": "New York City company office expansion, headquarters move, new Manhattan office, NYC team growth, or funding round",
       "windowDays": 7
     },
     {
       "id": "founder_chatter",
       "label": "Open founder chatter",
       "allowedHandles": [],
-      "query": "Founders and operators posting that their New York City team outgrew its office, is opening a NYC office, is moving offices, or is hiring a head of workplace",
+      "query": "Founders and operators posting that their New York City team outgrew its office, that they are leaving coworking or WeWork for their own space, that they are opening a NYC office, moving from remote to in-person or hybrid, hiring a Head of Workplace or Facilities, or hitting a headcount milestone of 20, 50, or 100 people",
+      "windowDays": 14
+    },
+    {
+      "id": "growth_language",
+      "label": "Growth and scale language",
+      "allowedHandles": [],
+      "query": "Companies saying they doubled or tripled headcount, are scaling their NYC presence, just made a senior New York hire (VP, Head of, CRO, COO, Chief of Staff), grew ARR sharply, or reached a new valuation",
       "windowDays": 14
     },
     {
@@ -42,28 +54,28 @@
   ],
   "webLanes": [
     {
-      "id": "funding_nyc",
-      "label": "NYC funding announcements",
-      "query": "New York City headquartered startup raised Series A, Series B, or Series C in the last 14 days",
-      "windowDays": 14
+      "id": "nyc_team_growth",
+      "label": "NYC team growth — the highest-weighted signal",
+      "query": "companies with a growing New York City team, dozens of open NYC roles, expanding their New York engineering or sales office",
+      "windowDays": 21
     },
     {
       "id": "office_moves",
       "label": "NYC office moves and expansions",
-      "query": "company opening new New York City office OR relocating headquarters to Manhattan OR expanding NYC office space",
+      "query": "company opening new New York City office OR relocating headquarters to Manhattan OR expanding NYC office space OR outgrowing its current New York office OR leaving coworking for dedicated space",
       "windowDays": 30
     },
     {
       "id": "workplace_hires",
-      "label": "Workplace / office leadership hires",
-      "query": "company hired Head of Workplace OR Director of Workplace Experience OR Office Manager in New York City",
+      "label": "Workplace and facilities leadership hires",
+      "query": "company hired Head of Workplace OR Director of Workplace Experience OR Head of Facilities OR Office Manager in New York City",
       "windowDays": 30
     },
     {
-      "id": "hiring_surge",
-      "label": "NYC hiring surges",
-      "query": "startup rapidly hiring in New York City, growing NYC team, dozens of open NYC roles",
-      "windowDays": 21
+      "id": "funding_nyc",
+      "label": "NYC funding — a timing signal, not a fit signal",
+      "query": "New York City headquartered startup raised Series A, Series B, or Series C, or announced a new valuation or sharp ARR growth, in the last 14 days",
+      "windowDays": 14
     }
   ],
   "excludedHandles": [
