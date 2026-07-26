@@ -23,13 +23,13 @@ import json
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from lib import qualify, state  # noqa: E402
+from lib import digest, qualify, state  # noqa: E402
 from lib.candidates import Candidate  # noqa: E402
 from lib.config import load_env_key, research_config  # noqa: E402
 from lib.discover import run_lane, web_lanes, x_lanes  # noqa: E402
@@ -244,18 +244,16 @@ def one_pass(args: argparse.Namespace) -> dict:
                     f"  python3 scripts/crm_intake.py --csv {csv_path} --write --yes",
                     flush=True,
                 )
-        elif fresh:
-            print(f"\nDRY RUN — {len(fresh)} candidates would be emitted:", flush=True)
-            for cand in fresh:
-                hits = ", ".join(cand.keyword_hits[:2]) or "no phrase"
-                ev = (cand.nyc_evidence or "no NYC evidence")[:55]
-                print(
-                    f"  [{cand.mode:<16} nyc={cand.fit_hint:<8}] {cand.company} "
-                    f"— {hits} — {ev}",
-                    flush=True,
-                )
-        else:
-            print("\nnothing new to emit this pass", flush=True)
+        # The brief is the point of the whole run — always write it, dry or live.
+        brief = digest.render(fresh, outcome["counts"], args.mode)
+        brief_path = ROOT / "out" / f"brief-{date.today().isoformat()}.md"
+        brief_path.parent.mkdir(parents=True, exist_ok=True)
+        brief_path.write_text(brief)
+        outcome["brief"] = str(brief_path)
+        print("\n" + "─" * 60, flush=True)
+        print(brief, flush=True)
+        print("─" * 60, flush=True)
+        print(f"brief → {brief_path}", flush=True)
 
         state.finish_run(conn, run_id, len(found), outcome["counts"]["emitted"])
         outcome["store"] = state.stats(conn)
