@@ -1,29 +1,43 @@
 {
-  "schemaVersion": "norman.research.v1",
-  "purpose": "Discovery arm. Finds NYC-area companies showing office-demand signals and hands them to NormanAI-crm-core intake. Never writes Notion.",
+  "schemaVersion": "norman.research.v3",
+  "purpose": "Discovery arm. Finds companies that are growing, raising, hiring in NYC, or under office-space pressure, and hands them to NormanAI-crm-core intake. Research qualifies; it never scores and never writes Notion.",
   "downstream": {
     "repo": "NormanAI-crm-core",
     "contract": "docs/crm-core-operating-contract.md §7",
     "writer": "scripts/crm_intake.py",
-    "note": "crm_intake.py is the ONLY Notion writer. Research emits CSV; intake dedups and creates."
+    "scorer": "scripts/crm_score_agent.py",
+    "note": "crm_intake.py is the ONLY Notion writer. Rows land at Status=Research and the CB/Careers/LinkedIn lanes enrich before the score agent scores. Research must not pre-empt any of that."
   },
   "crmCore": {
     "path": "../NormanAI-crm-core",
-    "scorer": "scripts/fit_score.py",
-    "intake": "scripts/crm_intake.py",
-    "note": "Research calls crm-core's REAL fit scorer via subprocess to predict how a candidate would score. Never reimplement the bands here — a drifting second copy is worse than no prediction."
+    "intake": "scripts/crm_intake.py"
   },
-  "gate": {
-    "mode": "predicted_fit",
-    "minPredictedFit": 55,
-    "minSignalStrengthFallback": 35,
-    "note": "Prospect threshold is 60 in crm-core. We gate at 55 because research estimates NYC heads/jobs rather than measuring them, and the lanes routinely revise upward. Below this, a company would land at Needs Review and cost JD attention for nothing. If the scorer is unreachable, fall back to signal strength and say so in the receipt."
+  "caps": {
+    "maxCandidatesPerRun": 60,
+    "maxCandidatesPerLane": 25,
+    "maxTightPerLane": 10,
+    "maxSearchesPerRun": 12,
+    "loopRestSeconds": 900,
+    "loopMaxBatches": 24,
+    "note": "Broad funding lanes get maxCandidatesPerLane; tight lanes get maxTightPerLane, because a tight lane returning 25 companies is a sign it stopped being tight."
   },
   "promote": {
     "enabled": false,
-    "maxPerRun": 10,
-    "requireNycEstimate": true,
-    "note": "When enabled (or --promote passed), research invokes crm-core's crm_intake.py directly so discovered companies land on the board without a human step. Capped per run so a bad batch is a small mess, not a big one. requireNycEstimate means a candidate with no NYC headcount OR roles estimate is emitted to CSV but not auto-promoted."
+    "maxPerRun": 25,
+    "note": "When enabled (or --promote passed), research invokes crm-core's crm_intake.py directly so companies land on the board with no human step. Capped so a bad batch is a small mess."
+  },
+  "sink": {
+    "csv": {
+      "outDir": "out",
+      "filenamePattern": "research-intake-{date}.csv"
+    }
+  },
+  "dedup": {
+    "localStore": "state/research.db",
+    "checkNotionReadOnly": true,
+    "notionDatabaseId": "3a33930e-64f4-8002-ac6b-f5f99d632099",
+    "notionTokenEnv": "NOTION_TOKEN",
+    "note": "Notion read is a courtesy pre-filter to cut noise. crm_intake.py remains the authority on dedup."
   },
   "grok": {
     "baseUrl": "https://api.x.ai/v1",
@@ -36,46 +50,5 @@
     "requestTimeoutSeconds": 240,
     "maxRetries": 3,
     "note": "Agent Tools API. The legacy search_parameters Live Search API was retired 2026-01-12 and returns 410. Run `python3 scripts/research_probe.py` to verify the live request shape before trusting a run."
-  },
-  "geography": {
-    "target": "NYC",
-    "nycProofRequired": true,
-    "acceptHq": ["NYC"],
-    "considerHq": ["Remote", "Other US", "International"],
-    "note": "considerHq companies are kept only when the signal itself is NYC-specific (e.g. 'opening a New York office')."
-  },
-  "caps": {
-    "maxCandidatesPerRun": 40,
-    "maxCandidatesPerLane": 25,
-    "maxSearchesPerRun": 12,
-    "minSignalStrength": 35,
-    "loopRestSeconds": 900,
-    "loopMaxBatches": 24
-  },
-  "exclusions": {
-    "industries": ["Biotech", "Therapeutics"],
-    "flagOnly": ["crypto", "blockchain", "web3", "NFT"],
-    "note": "Biotech/Therapeutics are hard-excluded per crm-core second-pass. Crypto terms are flagged in signal_notes, not dropped — the score agent owns that judgment."
-  },
-  "sink": {
-    "default": "csv",
-    "csv": {
-      "outDir": "out",
-      "filenamePattern": "research-intake-{date}.csv"
-    },
-    "supabase": {
-      "enabled": false,
-      "table": "research_candidates",
-      "urlEnv": "SUPABASE_URL",
-      "keyEnv": "SUPABASE_SERVICE_ROLE_KEY",
-      "migration": "sql/001_research_candidates.sql"
-    }
-  },
-  "dedup": {
-    "localStore": "state/research.db",
-    "checkNotionReadOnly": true,
-    "notionDatabaseId": "3a33930e-64f4-8002-ac6b-f5f99d632099",
-    "notionTokenEnv": "NOTION_TOKEN",
-    "note": "Notion read is a courtesy pre-filter to cut noise. crm_intake.py remains the authority on dedup."
   }
 }

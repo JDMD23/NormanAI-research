@@ -1,45 +1,50 @@
 import csv
 
-from lib.candidates import Candidate, score
+from lib.candidates import Candidate
 from lib.sinks import write_intake_csv
 
 
 def test_dedupe_within_merges_evidence_and_keeps_strongest():
     from research_run import dedupe_within
 
-    # One signal vs two, so "strongest" holds regardless of how weights are tuned.
-    weak = score(Candidate(
+    # The tighter mode is the more specific claim and should win the merge.
+    broad = Candidate(
         company="Acme Inc",
         website="https://acme.com",
-        nyc_proof="NYC office",
-        signals=["hiring_surge"],
+        mode="funding",
+        nyc_evidence="",
+        nyc_angle="none",
+        keyword_hits=["Series B"],
         source_urls=["https://a.example"],
-        lane="nyc_press",
-    ))
-    strong = score(Candidate(
+        lane="web_funding",
+    )
+    tight = Candidate(
         company="Acme Technologies",
         website="http://www.acme.com/about",
-        nyc_proof="Opening a Manhattan office",
-        signals=["hiring_surge", "nyc_office_opening"],
+        mode="office_expansion",
+        nyc_evidence="Opening a Manhattan office",
+        nyc_angle="strong",
+        keyword_hits=["opening a New York office"],
         source_urls=["https://b.example"],
-        lane="funding_nyc",
-    ))
-    assert strong.signal_strength > weak.signal_strength
+        lane="web_office_expansion",
+    )
+    weak, strong = broad, tight
 
     merged = dedupe_within([weak, strong])
     assert len(merged) == 1
     kept = merged[0]
-    assert kept.signal_strength == strong.signal_strength
+    assert kept.mode == "office_expansion"
+    assert kept.nyc_angle == "strong"
     assert set(kept.source_urls) == {"https://a.example", "https://b.example"}
-    assert set(kept.signals) == {"nyc_office_opening", "hiring_surge"}
+    assert set(kept.keyword_hits) == {"opening a New York office", "Series B"}
     assert "+" in kept.lane
 
 
 def test_dedupe_keeps_genuinely_different_companies():
     from research_run import dedupe_within
 
-    a = score(Candidate(company="Acme", website="https://acme.com", nyc_proof="x", signals=["hiring_surge"]))
-    b = score(Candidate(company="Zenith", website="https://zenith.com", nyc_proof="x", signals=["hiring_surge"]))
+    a = Candidate(company="Acme", website="https://acme.com")
+    b = Candidate(company="Zenith", website="https://zenith.com")
     assert len(dedupe_within([a, b])) == 2
 
 
@@ -73,7 +78,7 @@ def test_written_csv_round_trips(tmp_path):
 def test_seen_store_blocks_a_second_emission(tmp_path):
     from lib import state
 
-    cand = score(Candidate(company="Acme", website="https://acme.com", nyc_proof="x"))
+    cand = Candidate(company="Acme", website="https://acme.com")
     db = tmp_path / "research.db"
 
     with state.connect(db) as conn:
@@ -86,17 +91,16 @@ def test_seen_store_blocks_a_second_emission(tmp_path):
         assert state.stats(conn) == {"seen": 1, "emitted": 1, "held": 0}
 
 
-def test_seen_store_keeps_best_strength(tmp_path):
+def test_seen_store_counts_repeat_sightings_of_one_company(tmp_path):
     from lib import state
 
     db = tmp_path / "research.db"
-    weak = score(Candidate(company="Acme", website="https://acme.com", nyc_proof="x", signals=["headcount_growth"]))
-    strong = score(Candidate(company="Acme", website="https://acme.com", nyc_proof="x", signals=["nyc_office_opening"]))
+    first = Candidate(company="Acme", website="https://acme.com")
+    again = Candidate(company="Acme Inc.", website="https://www.acme.com/about")
 
     with state.connect(db) as conn:
-        state.record_seen(conn, strong)
-        state.record_seen(conn, weak)
-        row = conn.execute("SELECT best_strength, times_seen FROM seen").fetchone()
+        state.record_seen(conn, first)
+        state.record_seen(conn, again)
+        row = conn.execute("SELECT times_seen, company FROM seen").fetchone()
 
-    assert row["best_strength"] == strong.signal_strength
-    assert row["times_seen"] == 2
+    assert row["times_seen"] == 2, "same company by domain must not create a second row"

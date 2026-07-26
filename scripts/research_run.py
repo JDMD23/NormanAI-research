@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """NormanAI-research — discovery run.
 
-Finds NYC companies showing office-demand signals via Grok's Agent Tools
-(x_search + web_search), dedups against what we've already handed over, and
-writes an intake CSV for NormanAI-crm-core.
+Finds companies that are growing, raising, hiring in NYC, or under office-space
+pressure, and hands them to NormanAI-crm-core for intake and scoring.
 
     python3 scripts/research_run.py --dry-run
-    python3 scripts/research_run.py --lane x --dry-run
+    python3 scripts/research_run.py --mode funding --dry-run
     python3 scripts/research_run.py --write --yes
-    python3 scripts/research_run.py --write --yes --loop --batch-rest 900
+    python3 scripts/research_run.py --write --yes --promote
+    python3 scripts/research_run.py --write --yes --promote --loop
 
-Then, in NormanAI-crm-core:
-
-    python3 scripts/crm_intake.py --csv <emitted.csv> --dry-run
-    python3 scripts/crm_intake.py --csv <emitted.csv> --write --yes
+Research qualifies; it does not score. Rows land at Status=Research and
+crm-core's lanes enrich them before its score agent scores them.
 
 This script NEVER writes Notion. crm_intake.py is the only writer.
 """
@@ -24,13 +22,14 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from lib import fit_bridge, state  # noqa: E402
+from lib import qualify, state  # noqa: E402
 from lib.candidates import Candidate  # noqa: E402
 from lib.config import load_env_key, research_config  # noqa: E402
 from lib.discover import run_lane, web_lanes, x_lanes  # noqa: E402
@@ -39,19 +38,20 @@ from lib.sinks import (  # noqa: E402
     SinkError,
     notion_existing_keys,
     promote_via_intake,
-    push_supabase,
     write_evidence,
     write_intake_csv,
 )
 
 
-def collect(lane_kind: str, verbose: bool = True) -> tuple[list[Candidate], list[dict]]:
-    """Run every lane of the requested kind. Returns (candidates, lane reports)."""
+def collect(lane_kind: str, mode_filter: str | None, verbose: bool = True):
+    """Run every matching lane. Returns (candidates, lane reports)."""
     plan: list[tuple[dict, str]] = []
     if lane_kind in {"x", "all"}:
         plan += [(lane, "x") for lane in x_lanes()]
     if lane_kind in {"web", "all"}:
         plan += [(lane, "web") for lane in web_lanes()]
+    if mode_filter:
+        plan = [(lane, kind) for lane, kind in plan if lane.get("mode") == mode_filter]
 
     cap = research_config()["caps"]["maxSearchesPerRun"]
     if len(plan) > cap:
@@ -63,21 +63,21 @@ def collect(lane_kind: str, verbose: bool = True) -> tuple[list[Candidate], list
     reports: list[dict] = []
     for lane, kind in plan:
         result = run_lane(lane, kind)
-        reports.append(
-            {
-                "lane": result["lane"],
-                "kind": result["kind"],
-                "outcome": result["outcome"],
-                "found": len(result["candidates"]),
-                "note": result["note"],
-                "usage": result["usage"],
-            }
-        )
+        reports.append({
+            "lane": result["lane"],
+            "kind": result["kind"],
+            "mode": result["mode"],
+            "posture": result["posture"],
+            "outcome": result["outcome"],
+            "found": len(result["candidates"]),
+            "note": result["note"],
+            "usage": result["usage"],
+        })
         if verbose:
             note = f" — {result['note']}" if result["note"] else ""
             print(
-                f"  {result['kind']}/{result['lane']}: {result['outcome']} "
-                f"({len(result['candidates'])} found){note}",
+                f"  {result['kind']}/{result['lane']} [{result['posture']}]: "
+                f"{result['outcome']} ({len(result['candidates'])} found){note}",
                 flush=True,
             )
         found.extend(result["candidates"])
@@ -87,11 +87,13 @@ def collect(lane_kind: str, verbose: bool = True) -> tuple[list[Candidate], list
 def dedupe_within(candidates: list[Candidate]) -> list[Candidate]:
     """Collapse the same company appearing in several lanes.
 
-    Keeps the highest-scoring version and unions its evidence, so a company seen
-    by both X and the web ends up stronger, not duplicated.
+    Evidence is unioned rather than discarded: a company seen by both the
+    funding sweep and the office-expansion lane keeps both receipts, and the
+    tighter mode wins because it is the more specific claim.
     """
+    tightness = {"founder_language": 3, "office_expansion": 3, "hiring_growth": 2, "funding": 1}
     kept: list[Candidate] = []
-    for cand in sorted(candidates, key=lambda c: c.signal_strength, reverse=True):
+    for cand in sorted(candidates, key=lambda c: tightness.get(c.mode, 0), reverse=True):
         match = None
         for existing in kept:
             if hard_match(cand.as_dict(), existing.as_dict()):
@@ -103,9 +105,26 @@ def dedupe_within(candidates: list[Candidate]) -> list[Candidate]:
         for url in cand.source_urls:
             if url not in match.source_urls:
                 match.source_urls.append(url)
-        for sig in cand.signals:
-            if sig not in match.signals:
-                match.signals.append(sig)
+        for hit in cand.keyword_hits:
+            if hit not in match.keyword_hits:
+                match.keyword_hits.append(hit)
+        # Keep the strongest NYC evidence we saw anywhere.
+        rank = {"strong": 3, "moderate": 2, "weak": 1, "none": 0}
+        if rank.get(cand.nyc_angle, 0) > rank.get(match.nyc_angle, 0):
+            match.nyc_angle = cand.nyc_angle
+            match.nyc_evidence = cand.nyc_evidence or match.nyc_evidence
+        elif not match.nyc_evidence:
+            match.nyc_evidence = cand.nyc_evidence
+        # Fill blanks from the duplicate rather than losing the fact.
+        for attr in ("website", "linkedin", "crunchbase", "x_handle", "one_liner",
+                     "founders", "founded", "hq", "industries", "investors",
+                     "last_funding_type", "last_funding_date"):
+            if not getattr(match, attr) and getattr(cand, attr):
+                setattr(match, attr, getattr(cand, attr))
+        for attr in ("last_funding_usd", "total_funding_usd", "num_rounds",
+                     "nyc_open_roles_estimate"):
+            if getattr(match, attr) is None and getattr(cand, attr) is not None:
+                setattr(match, attr, getattr(cand, attr))
         if cand.lane not in match.lane:
             match.lane = f"{match.lane}+{cand.lane}"
     return kept
@@ -114,72 +133,54 @@ def dedupe_within(candidates: list[Candidate]) -> list[Candidate]:
 def one_pass(args: argparse.Namespace) -> dict:
     cfg = research_config()
     caps = cfg["caps"]
-    gate_cfg = cfg["gate"]
 
-    print(f"== discovery pass ({args.lane}) ==", flush=True)
-    found, reports = collect(args.lane)
+    print(f"== discovery pass (lane={args.lane} mode={args.mode or 'all'}) ==", flush=True)
+    found, reports = collect(args.lane, args.mode)
     print(f"raw candidates: {len(found)}", flush=True)
 
     merged = dedupe_within(found)
+    passed, rejected = qualify.apply(merged)
 
-    # Rank with crm-core's real scorer where we can, so research targets what
-    # JD's weights actually reward rather than what looks exciting in a tweet.
-    merged, fit_note = fit_bridge.apply(merged)
-    print(f"fit: {fit_note}", flush=True)
-
-    using_predicted = any(c.predicted_fit is not None for c in merged)
-    if using_predicted:
-        threshold = (
-            args.min_fit if args.min_fit is not None else gate_cfg["minPredictedFit"]
-        )
-        strong = [c for c in merged if (c.predicted_fit or 0) >= threshold]
-        gate_name = f"predicted_fit>={threshold}"
-    else:
-        threshold = (
-            args.min_strength
-            if args.min_strength is not None
-            else gate_cfg["minSignalStrengthFallback"]
-        )
-        strong = [c for c in merged if c.signal_strength >= threshold]
-        gate_name = f"signal_strength>={threshold} (fallback)"
-    weak = len(merged) - len(strong)
-    print(f"gate: {gate_name} — {len(strong)} pass, {weak} held", flush=True)
+    by_mode = Counter(c.mode for c in passed)
+    print(
+        f"qualified: {len(passed)} of {len(merged)} "
+        f"({', '.join(f'{m}={n}' for m, n in sorted(by_mode.items())) or 'none'})",
+        flush=True,
+    )
+    if rejected and args.show_rejects:
+        print("rejected:", flush=True)
+        for cand in rejected[:25]:
+            print(f"  - {cand.company}: {cand.qualify_reason}", flush=True)
 
     known = notion_existing_keys() if not args.no_notion_check else set()
     if known:
         print(f"CRM Core pre-filter: {len(known)} companies already on the board", flush=True)
 
     fresh: list[Candidate] = []
-    on_board = 0
-    already_sent = 0
-    no_identity = 0
+    on_board = already_sent = no_identity = 0
     with state.connect() as conn:
-        run_id = state.start_run(conn, args.lane)
-        for cand in strong:
+        run_id = state.start_run(conn, f"{args.lane}:{args.mode or 'all'}")
+        for cand in passed:
             state.record_seen(conn, cand)
             if not cand.key:
                 no_identity += 1
-                continue
-            if cand.key in known:
+            elif cand.key in known:
                 on_board += 1
-                continue
-            if state.is_emitted(conn, cand.key):
+            elif state.is_emitted(conn, cand.key):
                 already_sent += 1
-                continue
-            fresh.append(cand)
+            else:
+                fresh.append(cand)
 
-        fresh.sort(
-            key=lambda c: (c.predicted_fit if c.predicted_fit is not None else -1,
-                           c.signal_strength),
-            reverse=True,
-        )
+        # Tight-mode finds are the scarce, high-intent ones — never let a flood
+        # of funding rows push them out of the batch.
+        order = {"office_expansion": 0, "founder_language": 1, "hiring_growth": 2, "funding": 3}
+        fresh.sort(key=lambda c: (order.get(c.mode, 9), c.company.lower()))
         over_cap = max(0, len(fresh) - caps["maxCandidatesPerRun"])
         fresh = fresh[: caps["maxCandidatesPerRun"]]
         if over_cap:
             print(
-                f"! {over_cap} candidates held back by maxCandidatesPerRun="
-                f"{caps['maxCandidatesPerRun']} — they stay unemitted and will "
-                "surface next pass",
+                f"! {over_cap} held back by maxCandidatesPerRun="
+                f"{caps['maxCandidatesPerRun']} — they surface next pass",
                 flush=True,
             )
 
@@ -187,21 +188,24 @@ def one_pass(args: argparse.Namespace) -> dict:
             "ran_at": datetime.now(timezone.utc).isoformat(),
             "mode": "write" if args.write else "dry_run",
             "lane": args.lane,
-            "gate": gate_name,
-            "fit_note": fit_note,
-            "threshold": threshold,
+            "mode_filter": args.mode,
             "counts": {
                 "raw": len(found),
                 "merged": len(merged),
-                "below_threshold": weak,
+                "rejected": len(rejected),
                 "already_on_board": on_board,
                 "already_emitted": already_sent,
                 "no_identity": no_identity,
                 "held_by_cap": over_cap,
                 "emitted": 0,
+                "by_mode": dict(by_mode),
             },
             "lanes": reports,
             "candidates": [c.as_dict() for c in fresh],
+            "rejected_sample": [
+                {"company": c.company, "mode": c.mode, "reason": c.qualify_reason}
+                for c in rejected[:50]
+            ],
         }
 
         if args.write and fresh:
@@ -214,56 +218,25 @@ def one_pass(args: argparse.Namespace) -> dict:
             print(f"\nwrote {len(fresh)} candidates → {csv_path}", flush=True)
             print(f"evidence → {evidence_path}", flush=True)
 
-            if cfg["sink"]["supabase"].get("enabled"):
+            if args.promote or cfg["promote"].get("enabled"):
+                cap = cfg["promote"].get("maxPerRun", 25)
+                promotable = fresh[:cap]
+                if len(fresh) > cap:
+                    print(f"promote: capping {len(fresh)} → {cap}", flush=True)
+                promote_csv = write_intake_csv(
+                    promotable, csv_path.with_name(csv_path.stem + "-promote.csv")
+                )
                 try:
-                    pushed = push_supabase(fresh)
-                    outcome["supabase_rows"] = pushed
-                    print(f"supabase: upserted {pushed} rows", flush=True)
-                except SinkError as exc:
-                    outcome["supabase_error"] = str(exc)
-                    print(f"! supabase sink failed: {exc}", flush=True)
-
-            promote_cfg = cfg["promote"]
-            if args.promote or promote_cfg.get("enabled"):
-                promotable = fresh
-                if promote_cfg.get("requireNycEstimate"):
-                    promotable = [
-                        c for c in fresh
-                        if c.nyc_headcount_estimate is not None
-                        or c.nyc_open_roles_estimate is not None
-                    ]
-                    skipped = len(fresh) - len(promotable)
-                    if skipped:
-                        print(
-                            f"promote: {skipped} held back — no NYC headcount or "
-                            "roles estimate (still in the CSV for review)",
-                            flush=True,
-                        )
-                cap = promote_cfg.get("maxPerRun", 10)
-                if len(promotable) > cap:
+                    summary = promote_via_intake(promote_csv)
+                    outcome["promote"] = summary["counts"]
                     print(
-                        f"promote: capping {len(promotable)} → {cap} (promote.maxPerRun)",
+                        f"promoted {len(promotable)} → crm_intake.py: "
+                        f"{json.dumps(summary['counts'])}",
                         flush=True,
                     )
-                    promotable = promotable[:cap]
-
-                if promotable:
-                    promote_csv = write_intake_csv(
-                        promotable, csv_path.with_name(csv_path.stem + "-promote.csv")
-                    )
-                    try:
-                        summary = promote_via_intake(promote_csv)
-                        outcome["promote"] = summary["counts"]
-                        print(
-                            f"\npromoted {len(promotable)} → crm_intake.py: "
-                            f"{json.dumps(summary['counts'])}",
-                            flush=True,
-                        )
-                    except SinkError as exc:
-                        outcome["promote_error"] = str(exc)
-                        print(f"! promotion failed: {exc}", flush=True)
-                else:
-                    print("promote: nothing eligible this pass", flush=True)
+                except SinkError as exc:
+                    outcome["promote_error"] = str(exc)
+                    print(f"! promotion failed: {exc}", flush=True)
             else:
                 print(
                     "\nnext (in NormanAI-crm-core):\n"
@@ -274,14 +247,11 @@ def one_pass(args: argparse.Namespace) -> dict:
         elif fresh:
             print(f"\nDRY RUN — {len(fresh)} candidates would be emitted:", flush=True)
             for cand in fresh:
-                proof = cand.nyc_proof[:60] if cand.nyc_proof else "(no NYC proof)"
-                fit = "--" if cand.predicted_fit is None else f"{cand.predicted_fit:>3}"
-                heads = cand.nyc_headcount_estimate
-                roles = cand.nyc_open_roles_estimate
-                nyc = f"{heads if heads is not None else '?'}h/{roles if roles is not None else '?'}r"
+                hits = ", ".join(cand.keyword_hits[:2]) or "no phrase"
+                ev = (cand.nyc_evidence or "no NYC evidence")[:55]
                 print(
-                    f"  fit={fit} sig={cand.signal_strength:>3} {nyc:>9}  "
-                    f"{cand.company} — {', '.join(cand.signals) or 'no signals'} — {proof}",
+                    f"  [{cand.mode:<16} nyc={cand.fit_hint:<8}] {cand.company} "
+                    f"— {hits} — {ev}",
                     flush=True,
                 )
         else:
@@ -295,7 +265,7 @@ def one_pass(args: argparse.Namespace) -> dict:
     receipt.write_text(json.dumps(outcome, indent=2, default=str))
     c = outcome["counts"]
     print(
-        f"\nDONE raw={c['raw']} merged={c['merged']} weak={c['below_threshold']} "
+        f"\nDONE raw={c['raw']} merged={c['merged']} rejected={c['rejected']} "
         f"emitted={c['emitted']} receipt={receipt}",
         flush=True,
     )
@@ -303,12 +273,7 @@ def one_pass(args: argparse.Namespace) -> dict:
 
 
 def run_loop(args: argparse.Namespace) -> int:
-    """Batch → rest → repeat, with the same anti-spin guards sales-nav learned.
-
-    Stops on: max batches, a blocked API (auth/deprecation), or two consecutive
-    batches that emit nothing. A loop that emits nothing twice running is not
-    quietly working — it is burning Grok search credits.
-    """
+    """Batch → rest → repeat, with the anti-spin guards sales-nav learned."""
     caps = research_config()["caps"]
     rest = args.batch_rest if args.batch_rest is not None else caps["loopRestSeconds"]
     max_batches = args.max_batches if args.max_batches is not None else caps["loopMaxBatches"]
@@ -339,15 +304,19 @@ def run_loop(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="NormanAI research discovery run")
     parser.add_argument("--lane", choices=["x", "web", "all"], default="all")
+    parser.add_argument(
+        "--mode",
+        choices=["funding", "office_expansion", "hiring_growth", "founder_language"],
+        default=None,
+        help="run only lanes of this mode (default: all four)",
+    )
     parser.add_argument("--write", action="store_true", help="emit the intake CSV")
     parser.add_argument("--yes", action="store_true", help="required with --write")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--min-fit", type=int, default=None,
-                        help="override the predicted-fit gate")
-    parser.add_argument("--min-strength", type=int, default=None,
-                        help="override the fallback signal-strength gate")
     parser.add_argument("--promote", action="store_true",
                         help="hand the CSV straight to crm-core's crm_intake.py")
+    parser.add_argument("--show-rejects", action="store_true",
+                        help="print why candidates were rejected")
     parser.add_argument("--no-notion-check", action="store_true",
                         help="skip the read-only CRM Core pre-filter")
     parser.add_argument("--loop", action="store_true")
@@ -362,8 +331,6 @@ def main() -> int:
     if args.promote and not args.write:
         raise SystemExit("--promote requires --write --yes (it creates CRM rows)")
 
-    # Preflight: a missing key should fail before any lane runs, not halfway
-    # through a pass with partial state written.
     key_env = research_config()["grok"].get("apiKeyEnv", "XAI_API_KEY")
     if not load_env_key(key_env):
         raise SystemExit(

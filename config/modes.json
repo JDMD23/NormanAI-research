@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "norman.research.modes.v1",
+  "note": "Four modes run at once, under two postures. Funding is BROAD — high coverage, no NYC requirement. The other three are TIGHT — only concrete, current or near-term NYC office demand or headcount growth that actually triggers real estate needs. Research qualifies; it does not score. Fit Score belongs to crm-core's scoring lane and runs after intake.",
+
+  "modes": {
+    "funding": {
+      "label": "Funding & Valuation",
+      "posture": "broad",
+      "goal": "High coverage of legitimate funding events.",
+      "requireNycEvidence": false,
+      "requireIdentity": true,
+      "qualify": "(from a watched account OR matches a funding keyword) AND relevant sector AND identifiable",
+      "keywords": [
+        "Series A", "Series B", "Series C", "Series D", "Series E",
+        "seed round", "pre-seed", "raised", "raises", "has raised",
+        "funding round", "closes funding", "secures funding",
+        "led the round", "led by", "oversubscribed",
+        "ARR", "annual recurring revenue", "valuation", "valued at",
+        "unicorn", "late stage", "growth round", "Series unknown"
+      ],
+      "sectors": [
+        "AI", "artificial intelligence", "agents", "machine learning",
+        "software", "enterprise SaaS", "SaaS", "fintech", "financial technology",
+        "healthtech", "digital health", "robotics", "developer tools", "devtools",
+        "data infrastructure", "analytics", "cybersecurity", "automation",
+        "workflow", "vertical SaaS", "proptech"
+      ]
+    },
+
+    "office_expansion": {
+      "label": "Office Expansion",
+      "posture": "tight",
+      "goal": "Explicit, concrete NYC space demand.",
+      "requireNycEvidence": true,
+      "requireIdentity": true,
+      "qualify": "an explicit concrete office/space statement tied to NYC",
+      "keywords": [
+        "new office lease", "signed a lease", "moving to a larger space",
+        "larger office", "first NYC office", "first New York office",
+        "opening a New York office", "opening our NYC office",
+        "outgrowing our current space", "outgrown our office",
+        "relocating to New York", "moving to Manhattan", "HQ in NYC",
+        "headquarters in New York", "expanding our New York office",
+        "leaving WeWork", "leaving coworking", "moved offices",
+        "Head of Workplace", "Head of Facilities", "facilities hire",
+        "Director of Workplace Experience"
+      ]
+    },
+
+    "hiring_growth": {
+      "label": "Hiring & Team Growth",
+      "posture": "tight",
+      "goal": "Headcount growth of the kind that triggers real estate needs.",
+      "requireNycEvidence": true,
+      "requireIdentity": true,
+      "qualify": "multiple NYC roles, a senior NYC hire, or a stated NYC team build-out",
+      "keywords": [
+        "hiring in New York", "hiring in NYC", "multiple NYC roles",
+        "building our NYC team", "building out our New York team",
+        "growing our New York office", "NYC team",
+        "VP of", "Head of", "CRO", "COO", "Chief of Staff",
+        "doubled headcount", "tripled headcount", "doubled our team",
+        "office manager", "facilities manager"
+      ],
+      "minNycRoles": 3
+    },
+
+    "founder_language": {
+      "label": "Founder & Growth Language",
+      "posture": "tight",
+      "goal": "Founder/CEO statements showing real space pressure.",
+      "requireNycEvidence": true,
+      "requireIdentity": true,
+      "qualify": "a first-person founder or CEO statement of space pressure, or a headcount milestone that usually forces a move",
+      "keywords": [
+        "we're outgrowing our current office", "we have outgrown our office",
+        "actively looking for space", "looking for office space in NYC",
+        "we need more space", "bursting at the seams",
+        "moving from remote to in-person", "returning to the office",
+        "hit 20 people", "hit 50 people", "hit 100 people",
+        "we're growing fast", "scaling our NYC presence",
+        "just hired", "team expansion"
+      ],
+      "headcountMilestones": [20, 50, 100]
+    }
+  },
+
+  "watchedAccounts": [
+    "arfurgrok", "healthcareaiguy", "fundable_ai", "raisingfi", "yoramdw",
+    "paraformtalent", "dealwire_", "harmonic_ai", "nextplayso", "arfurrock"
+  ],
+
+  "nycAngle": {
+    "values": ["strong", "moderate", "weak", "none"],
+    "strong": "Explicit NYC office, NYC space search, NYC HQ, or multiple NYC roles.",
+    "moderate": "NYC HQ or NYC presence stated, without a space or hiring specific.",
+    "weak": "NYC mentioned only incidentally — a NYC-based investor, a founder who lives there.",
+    "none": "No NYC connection found.",
+    "rule": "fitHint can never exceed what nycEvidence supports. No evidence means 'none', whatever the model claims."
+  },
+
+  "exclusions": {
+    "industries": ["Biotech", "Therapeutics"],
+    "flagOnly": ["crypto", "blockchain", "web3", "NFT"],
+    "note": "Biotech/Therapeutics are hard-excluded per crm-core second-pass. Crypto is flagged, never dropped — the score agent owns that judgment."
+  }
+}

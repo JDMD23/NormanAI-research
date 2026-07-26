@@ -37,18 +37,42 @@ If research ever needs the CRM to change, the answer is to emit a CSV or extend
 `crm_intake.py` — never to open a Notion client here. `scripts/lib/sinks.py` has
 no Notion write path, and that absence is deliberate.
 
-## 3. Signal Strength ≠ Fit Score
+## 3. Research qualifies; crm-core scores
 
-| | Signal Strength | Fit Score |
+There is no score in this repo. Qualification is binary — did we find enough to
+justify creating a row — and it is answered by rules in `scripts/lib/qualify.py`,
+not by a number.
+
+| | Qualification | Fit Score |
 |---|---|---|
 | Owner | this repo | crm-core scoring lane |
-| Question | "is this worth handing over at all?" | "how good a prospect is it?" |
-| Inputs | search-time signals + NYC proof | headcount, jobs, funding, investors, industry |
+| Question | "does this belong in the CRM at all?" | "how good a prospect is it?" |
+| Inputs | keyword hits, NYC evidence, sector, identifiability | headcount, jobs, funding, investors, industry |
 | Written to Notion | **never** | yes, with FS\_\* components |
 
-Signal Strength dies at the repo boundary. It appears in the evidence sidecar
-and the Supabase staging table, and nowhere else. Emitting it into the CSV
-would put a discovery guess in front of the scoring lane's real work.
+An earlier version of this repo predicted Fit Score to rank candidates before
+emission. That was removed deliberately. Ranking at discovery time competes with
+the scoring lane using worse inputs — research sees a press mention, the lanes
+see measured NYC headcount — and any threshold it applies silently withholds
+companies the real scorer never got to judge. Find, qualify, hand over.
+
+## 3a. The two postures
+
+| Mode | Posture | NYC evidence required |
+|---|---|---|
+| `funding` | broad | no |
+| `office_expansion` | tight | yes — strong or moderate |
+| `hiring_growth` | tight | yes — strong or moderate |
+| `founder_language` | tight | yes — strong or moderate |
+
+Broad exists because funding events are cheap to over-collect and expensive to
+miss: an extra row costs one enrichment pass, a missed round costs a deal.
+Tight exists because the opposite is true for space signals — a company wrongly
+flagged as needing an office wastes a call and JD's credibility.
+
+`hiring_growth` additionally needs one of: `minNycRoles` open NYC roles, a
+senior NYC hire, or a stated team build-out. "Hiring in NYC" with two roles is
+not a real estate event.
 
 ## 4. Unknown ≠ 0
 
@@ -63,16 +87,21 @@ A blank funding amount means "we didn't find one" and the Crunchbase lane will
 fill it. A `0` means "this company has raised nothing", which is a claim, and a
 wrong one. The second is far more expensive than the first.
 
-## 5. NYC proof is mandatory
+## 5. Evidence discipline
 
-Every candidate carries `nyc_proof` — a concrete statement of NYC presence or
-NYC intent from a source actually read. Missing proof is −40, which alone drops
-a candidate below the emit threshold of 35.
+Three receipts, each enforced in `qualify.py`:
+
+- **`keyword_hits`** — the exact qualifying phrases found in a source. No
+  phrase, no candidate, in either posture.
+- **`source_urls`** — links actually used. Empty is always a reject.
+- **`nyc_evidence`** — quoted or closely paraphrased. `nyc_angle` (surfaced as
+  `fitHint`) is judged **only** from it. A model claiming "strong" with no
+  evidence is clamped to "none".
 
 This exists because the failure mode of an LLM sourcing agent is confident
 plausibility: it will happily return well-known companies that have nothing to
-do with New York. The penalty makes the absence of evidence expensive rather
-than invisible.
+do with New York, and assert a NYC angle it cannot show. Clamping makes an
+unsupported claim structurally impossible rather than merely discouraged.
 
 ## 6. Lane outcomes
 
@@ -101,34 +130,21 @@ Learned from sales-nav §10.6, where a loop wrote the same 6 rows 29 times:
 ## 8. Costs
 
 X search and web search bill per call (~$5 per 1,000) on top of tokens. A full
-run is 8 lanes = 8 search calls plus tokens. At the default twice-daily weekday
-schedule that is ~350 search calls a month — a couple of dollars. `maxSearchesPerRun`
-is the ceiling that keeps a runaway loop from becoming a bill.
+run is 9 lanes = 9 search calls. At the 5×/weekday schedule that is roughly 950
+search calls a month — under $5, plus tokens. `maxSearchesPerRun` is the ceiling
+that keeps a runaway loop from becoming a bill.
 
-## 9. Targeting is delegated, not duplicated
+## 9. Merging duplicates keeps the more specific claim
 
-Research predicts a candidate's Fit Score by running crm-core's real
-`fit_score.py` as a subprocess against the real `fit-score-weights.json`. It
-does not reimplement the bands.
+One company routinely appears in several lanes — the funding sweep sees the
+round, the office lane sees the lease. `dedupe_within()` collapses them on
+crm-core's identity keys and keeps the **tighter mode**, because that is the
+more actionable fact, while unioning both sets of `keyword_hits` and
+`source_urls` and taking the strongest NYC angle seen anywhere.
 
-This matters more than it looks. The alternative — a second copy of the scoring
-logic living here — would drift the first time JD retunes a weight, and the
-drift would be silent: research would keep sourcing against last month's
-definition of a good company while the board scored against this month's. A
-prediction that is confidently wrong is worse than no prediction.
-
-Consequences to keep in mind:
-
-- Research supplies **estimates** for NYC heads and NYC jobs. They exist to
-  triage and are never written to Notion — the LinkedIn and Careers lanes own
-  those fields and measure them properly.
-- With two of (heads, jobs, funding date) missing, the engine applies its
-  `dataBlindCap` of 70. Most research-stage predictions are therefore ceilings,
-  not verdicts. Gate at 55 rather than the 60 Prospect threshold to leave room
-  for the lanes to revise upward.
-- If crm-core is unreachable, `fit_bridge.apply()` degrades to signal strength
-  and **says so in the receipt and on stdout**. A silent gate switch would be
-  the worst possible failure here.
+Blank fields are filled from the duplicate rather than lost. A merge that
+discards a fact one lane found is a silent data loss, and the merged row is the
+only one that reaches intake.
 
 ## 10. Automatic promotion and where it runs
 
@@ -150,11 +166,12 @@ the board hasn't been touched.
 
 Guards on promotion, in order:
 
-1. predicted fit ≥ `gate.minPredictedFit`
-2. `promote.requireNycEstimate` — no NYC numbers, no auto-add
-3. `promote.maxPerRun` — a bad batch is a small mess
-4. `crm_intake.py`'s hard dedup — the final authority
-5. everything lands at `Status=Research`, a machine status, so the score agent
+1. qualification — broad or tight rules, per §3a
+2. the seen-store — a company is never handed over twice
+3. the read-only board pre-filter — skip what is already there
+4. `promote.maxPerRun` — a bad batch is a small mess
+5. `crm_intake.py`'s hard dedup — the final authority
+6. everything lands at `Status=Research`, a machine status, so the score agent
    can exit it without touching anything JD owns
 
 ## 11. Hard forbidden

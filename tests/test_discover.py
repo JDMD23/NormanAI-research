@@ -9,7 +9,6 @@ import json
 import pytest
 
 from lib import discover, grok
-from lib.config import signals_config
 
 
 def fake_response(candidates: list[dict]) -> dict:
@@ -20,7 +19,8 @@ def fake_response(candidates: list[dict]) -> dict:
     }
 
 
-LANE = {"id": "test_lane", "query": "test query", "windowDays": 7, "allowedHandles": ["a", "b"]}
+LANE = {"id": "test_lane", "mode": "funding", "query": "test query",
+        "windowDays": 7, "allowedHandles": ["a", "b"]}
 
 
 def test_lane_returns_scored_candidates(monkeypatch):
@@ -28,8 +28,9 @@ def test_lane_returns_scored_candidates(monkeypatch):
         {
             "company": "Acme",
             "website": "https://acme.com",
-            "nyc_proof": "Signed a Flatiron lease",
-            "signals": ["nyc_office_opening", "funding_round"],
+            "nyc_evidence": "Signed a Flatiron lease",
+            "nyc_angle": "strong",
+            "keyword_hits": ["signed a lease"],
             "signal_notes": "announced 2026-07-20",
             "source_urls": ["https://acme.example/news"],
             "last_funding_usd": 30_000_000,
@@ -43,15 +44,17 @@ def test_lane_returns_scored_candidates(monkeypatch):
     cand = result["candidates"][0]
     assert cand.company == "Acme"
     assert cand.lane == "test_lane"
-    weights = {n: s["weight"] for n, s in signals_config()["signals"].items()}
-    assert cand.signal_strength == weights["nyc_office_opening"] + weights["funding_round"]
+    assert cand.mode == "funding"
+    assert cand.nyc_angle == "strong"
+    assert cand.keyword_hits == ["signed a lease"]
     assert result["usage"]["sources_used"] == 3
 
 
 def test_candidate_without_own_sources_inherits_lane_citations(monkeypatch):
     monkeypatch.setattr(grok, "call", lambda body: fake_response([
-        {"company": "Acme", "website": "https://acme.com", "nyc_proof": "NYC HQ",
-         "signals": ["hiring_surge"], "signal_notes": "", "source_urls": []}
+        {"company": "Acme", "website": "https://acme.com", "nyc_evidence": "NYC HQ",
+         "nyc_angle": "moderate", "keyword_hits": ["hiring in NYC"],
+         "signal_notes": "", "source_urls": []}
     ]))
 
     result = discover.run_lane(LANE, "x")
@@ -60,9 +63,9 @@ def test_candidate_without_own_sources_inherits_lane_citations(monkeypatch):
 
 def test_nameless_candidates_are_dropped(monkeypatch):
     monkeypatch.setattr(grok, "call", lambda body: fake_response([
-        {"company": "", "nyc_proof": "x", "signals": [], "signal_notes": "", "source_urls": []},
-        {"company": "  ", "nyc_proof": "x", "signals": [], "signal_notes": "", "source_urls": []},
-        {"company": "Real Co", "nyc_proof": "x", "signals": [], "signal_notes": "", "source_urls": []},
+        {"company": "", "nyc_evidence": "x", "nyc_angle": "weak", "keyword_hits": [], "signal_notes": "", "source_urls": []},
+        {"company": "  ", "nyc_evidence": "x", "nyc_angle": "weak", "keyword_hits": [], "signal_notes": "", "source_urls": []},
+        {"company": "Real Co", "nyc_evidence": "x", "nyc_angle": "weak", "keyword_hits": [], "signal_notes": "", "source_urls": []},
     ]))
 
     result = discover.run_lane(LANE, "x")
@@ -100,8 +103,9 @@ def test_unparseable_output_reports_retry(monkeypatch):
 
 def test_lane_respects_its_cap(monkeypatch):
     many = [
-        {"company": f"Co{i}", "website": f"https://co{i}.com", "nyc_proof": "NYC",
-         "signals": ["hiring_surge"], "signal_notes": "", "source_urls": ["https://x.example"]}
+        {"company": f"Co{i}", "website": f"https://co{i}.com", "nyc_evidence": "NYC",
+         "nyc_angle": "moderate", "keyword_hits": ["hiring in NYC"],
+         "signal_notes": "", "source_urls": ["https://x.example"]}
         for i in range(50)
     ]
     monkeypatch.setattr(grok, "call", lambda body: fake_response(many))
@@ -119,7 +123,7 @@ def test_x_lane_sends_handles_and_web_lane_does_not(monkeypatch):
     assert "from_date" in x_tools["x_search"]
 
     seen.clear()
-    discover.run_lane({"id": "w", "query": "q", "windowDays": 30}, "web")
+    discover.run_lane({"id": "w", "mode": "funding", "query": "q", "windowDays": 30}, "web")
     web_tools = {t["type"]: t for t in seen["tools"]}
     assert set(web_tools) == {"web_search"}
 

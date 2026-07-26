@@ -4,14 +4,14 @@ Two sinks ship today:
 
   csv       — writes the hydrated intake CSV that NormanAI-crm-core's
               `crm_intake.py` consumes. This is the contract of record.
-  supabase  — mirrors candidates into this repo's own `research_candidates`
-              staging table (sql/001_research_candidates.sql).
+  promote   — invokes `crm_intake.py` on that CSV so rows land on the board
+              with no human step.
 
 Deliberately absent: a Notion writer. `crm_intake.py` is the single writer to
 Norman CRM Core and it does the hard dedup. Adding a second writer here would
 create exactly the two-boards-fighting problem the operating contract warns
-about. To enqueue into the workspace D1 job queue instead, add an adapter here
-against that schema — do not reach into Notion.
+about. The workspace D1 queue is keyed on a Notion page id, so it cannot
+accept a company that has no row yet — creation must go through intake first.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.candidates import CSV_COLUMNS, Candidate
-from lib.config import ROOT, load_env_key, research_config
+from lib.config import ROOT, crm_core_path, load_env_key, research_config
 
 
 class SinkError(RuntimeError):
@@ -67,58 +67,6 @@ def write_evidence(candidates: list[Candidate], out_path: Path | None = None) ->
     return out_path
 
 
-def push_supabase(candidates: list[Candidate]) -> int:
-    """Upsert candidates into the research_candidates staging table.
-
-    Uses PostgREST directly so the repo stays dependency-free. Returns the
-    number of rows sent.
-    """
-    cfg = research_config()["sink"]["supabase"]
-    if not cfg.get("enabled"):
-        raise SinkError("supabase sink is disabled in config/research.json")
-    url = load_env_key(cfg["urlEnv"])
-    key = load_env_key(cfg["keyEnv"])
-    if not url or not key:
-        raise SinkError(f"set {cfg['urlEnv']} and {cfg['keyEnv']} to use the supabase sink")
-    if not candidates:
-        return 0
-
-    rows: list[dict[str, Any]] = []
-    for cand in candidates:
-        row = cand.as_dict()
-        row["signals"] = cand.signals
-        row["source_urls"] = cand.source_urls
-        row["score_notes"] = cand.score_notes
-        rows.append(row)
-
-    endpoint = f"{url.rstrip('/')}/rest/v1/{cfg['table']}?on_conflict=identity_key"
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(rows, default=str).encode("utf-8"),
-        method="POST",
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            if resp.status >= 300:
-                raise SinkError(f"supabase returned HTTP {resp.status}")
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8")[:1000]
-        except Exception:  # noqa: BLE001 - diagnostics only
-            pass
-        raise SinkError(f"supabase HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise SinkError(f"supabase transport error: {exc}") from exc
-    return len(rows)
-
-
 def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
     """Hand the CSV to crm-core's crm_intake.py and let it create the rows.
 
@@ -127,8 +75,6 @@ def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
     it. Intake keeps its hard dedup, its Need-* seeding, and its receipt.
     """
     import subprocess
-
-    from lib.fit_bridge import crm_core_path
 
     core = crm_core_path()
     script = core / "scripts" / "crm_intake.py"

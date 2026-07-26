@@ -76,12 +76,19 @@ def research_config() -> dict:
     return load_config("research")
 
 
-def signals_config() -> dict:
-    return load_config("signals")
+def modes_config() -> dict:
+    return load_config("modes")
 
 
 def sources_config() -> dict:
     return load_config("sources")
+
+
+def crm_core_path() -> Path:
+    """Where the NormanAI-crm-core checkout lives, for promotion."""
+    raw = (research_config().get("crmCore") or {}).get("path") or "../NormanAI-crm-core"
+    path = Path(raw)
+    return path if path.is_absolute() else (ROOT / path).resolve()
 
 
 def state_path(rel: str) -> Path:

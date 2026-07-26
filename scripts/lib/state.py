@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS seen (
     last_seen      TEXT NOT NULL,
     times_seen     INTEGER NOT NULL DEFAULT 1,
     emitted_at     TEXT,
-    best_strength  INTEGER NOT NULL DEFAULT 0,
+    best_mode      TEXT,
+    best_nyc_angle TEXT,
     payload        TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
@@ -74,7 +75,12 @@ def is_emitted(conn: sqlite3.Connection, key: str) -> bool:
 
 
 def record_seen(conn: sqlite3.Connection, cand) -> None:
-    """Upsert a sighting. Keeps the strongest signal strength ever observed."""
+    """Upsert a sighting, keeping the most specific claim ever seen.
+
+    A company first found by the broad funding sweep and later by the office
+    expansion lane should end up remembered as an office-expansion find — that
+    is the more actionable fact.
+    """
     key = cand.key
     if not key:
         return
@@ -82,18 +88,23 @@ def record_seen(conn: sqlite3.Connection, cand) -> None:
     conn.execute(
         """
         INSERT INTO seen (identity_key, company, website, first_seen, last_seen,
-                          times_seen, best_strength, payload)
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                          times_seen, best_mode, best_nyc_angle, payload)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
         ON CONFLICT(identity_key) DO UPDATE SET
-            last_seen     = excluded.last_seen,
-            times_seen    = seen.times_seen + 1,
-            best_strength = MAX(seen.best_strength, excluded.best_strength),
-            company       = excluded.company,
-            website       = COALESCE(NULLIF(excluded.website, ''), seen.website),
-            payload       = excluded.payload
+            last_seen      = excluded.last_seen,
+            times_seen     = seen.times_seen + 1,
+            best_mode      = CASE WHEN excluded.best_mode = 'funding'
+                                   AND seen.best_mode IS NOT NULL
+                                  THEN seen.best_mode ELSE excluded.best_mode END,
+            best_nyc_angle = CASE WHEN excluded.best_nyc_angle = 'none'
+                                  THEN COALESCE(seen.best_nyc_angle, 'none')
+                                  ELSE excluded.best_nyc_angle END,
+            company        = excluded.company,
+            website        = COALESCE(NULLIF(excluded.website, ''), seen.website),
+            payload        = excluded.payload
         """,
         (key, cand.company, cand.website, now_iso(), now_iso(),
-         cand.signal_strength, payload),
+         cand.mode, cand.nyc_angle, payload),
     )
 
 

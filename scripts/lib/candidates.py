@@ -1,4 +1,7 @@
-"""Candidate model: the schema Grok fills, the score, and the intake CSV row.
+"""Candidate model: what Grok returns, and the intake CSV row.
+
+There is deliberately no scoring here. Research finds and qualifies; crm-core's
+score agent scores after intake, with enriched inputs it can actually trust.
 
 The CSV column names below are not cosmetic — they are matched against
 `CSV_ALIASES` in NormanAI-crm-core's `scripts/crm_intake.py`. Renaming a column
@@ -10,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from lib.config import research_config, signals_config
+from lib.config import load_config
 from lib.identity import identity_key, normalize_domain, x_handle_url
 
 # Order matters: this is the CSV header, and it mirrors crm_intake.py's aliases.
@@ -33,13 +36,11 @@ CSV_COLUMNS = [
     "Top 5 Investors",
 ]
 
-# HQ values crm-core's `map_hq` recognises.
 HQ_OPTIONS = [
     "NYC", "SF Bay", "LA", "Boston", "Austin", "Seattle", "Chicago",
     "Remote", "Other US", "International", "Unknown",
 ]
 
-# Funding types crm-core's `map_funding_type` recognises.
 FUNDING_TYPES = [
     "Pre-Seed", "Seed", "Series A", "Series B", "Series C", "Series D",
     "Series E+", "Growth", "Debt Financing", "Corporate Round", "Grant",
@@ -50,11 +51,11 @@ FUNDING_TYPES = [
 def response_schema() -> dict[str, Any]:
     """JSON schema handed to Grok so candidates come back structured.
 
-    Every field is nullable rather than defaulted: an unknown must arrive as
-    null so it can stay unknown. Unknown ≠ 0 is a crm-core rule and it starts
-    here, at the point of capture.
+    Every fact is nullable rather than defaulted: an unknown must arrive as null
+    so it can stay unknown. Unknown ≠ 0 is a crm-core rule and it starts here,
+    at the point of capture.
     """
-    signal_names = sorted(signals_config()["signals"].keys())
+    angles = load_config("modes")["nycAngle"]["values"]
     return {
         "type": "object",
         "additionalProperties": False,
@@ -66,8 +67,8 @@ def response_schema() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "required": [
-                        "company", "website", "nyc_proof", "signals",
-                        "signal_notes", "source_urls",
+                        "company", "website", "nyc_evidence", "nyc_angle",
+                        "keyword_hits", "signal_notes", "source_urls",
                     ],
                     "properties": {
                         "company": {"type": "string"},
@@ -89,25 +90,27 @@ def response_schema() -> dict[str, Any]:
                         "total_funding_usd": {"type": ["number", "null"]},
                         "num_rounds": {"type": ["integer", "null"]},
                         "investors": {"type": ["string", "null"]},
-                        "nyc_proof": {
-                            "type": ["string", "null"],
-                            "description": "Concrete evidence of NYC presence or intent. Null when there is none — never guess.",
-                        },
-                        "nyc_headcount_estimate": {
-                            "type": ["integer", "null"],
-                            "description": "Approximate people based in the NYC metro. Null unless a source states or strongly implies it. This is the single most important field — do not guess it.",
-                        },
                         "nyc_open_roles_estimate": {
                             "type": ["integer", "null"],
-                            "description": "Approximate open roles located in NYC. Null unless a source states or strongly implies it.",
+                            "description": "Open roles located in NYC, if a source states or clearly implies a count.",
                         },
-                        "nyc_estimate_basis": {
+                        "nyc_evidence": {
                             "type": ["string", "null"],
-                            "description": "Where the two NYC numbers came from. Required if either is non-null.",
+                            "description": "Quoted or closely paraphrased evidence of the NYC connection. Null when there is none — never guess.",
                         },
-                        "signals": {
+                        "nyc_angle": {
+                            "type": "string",
+                            "enum": angles,
+                            "description": "How strong the NYC angle is, judged only from nyc_evidence.",
+                        },
+                        "keyword_hits": {
                             "type": "array",
-                            "items": {"type": "string", "enum": signal_names},
+                            "items": {"type": "string"},
+                            "description": "The exact qualifying phrases found in the source. This is the receipt for why the company was included.",
+                        },
+                        "source_handle": {
+                            "type": ["string", "null"],
+                            "description": "X handle that surfaced this, when it came from a post.",
                         },
                         "signal_notes": {"type": "string"},
                         "source_urls": {"type": "array", "items": {"type": "string"}},
@@ -136,26 +139,24 @@ class Candidate:
     total_funding_usd: float | None = None
     num_rounds: int | None = None
     investors: str = ""
-    nyc_proof: str = ""
-    # The two inputs worth 55 of crm-core's 100 fit points. Research can only
-    # estimate them; the LinkedIn and Careers lanes measure them properly and
-    # overwrite. Estimates exist to triage, never to be written to Notion.
-    nyc_headcount_estimate: int | None = None
     nyc_open_roles_estimate: int | None = None
-    nyc_estimate_basis: str = ""
-    signals: list[str] = field(default_factory=list)
+
+    # Why it was included.
+    nyc_evidence: str = ""
+    nyc_angle: str = "none"
+    fit_hint: str = "none"
+    keyword_hits: list[str] = field(default_factory=list)
+    source_handle: str = ""
     signal_notes: str = ""
     source_urls: list[str] = field(default_factory=list)
+
+    # Bookkeeping.
+    mode: str = "funding"
     lane: str = ""
-    signal_strength: int = 0
-    score_notes: list[str] = field(default_factory=list)
-    predicted_fit: int | None = None
-    predicted_fit_reason: str = ""
-    predicted_fit_flags: list[str] = field(default_factory=list)
-    predicted_fit_components: dict = field(default_factory=dict)
+    qualify_reason: str = ""
 
     @classmethod
-    def from_model(cls, raw: dict[str, Any], lane: str = "") -> "Candidate":
+    def from_model(cls, raw: dict[str, Any], lane: str = "", mode: str = "funding") -> "Candidate":
         def s(key: str) -> str:
             val = raw.get(key)
             return str(val).strip() if val not in (None, "") else ""
@@ -170,15 +171,8 @@ class Candidate:
                 return None
 
         def i(key: str) -> int | None:
-            val = raw.get(key)
-            if val in (None, ""):
-                return None
-            try:
-                return int(float(val))
-            except (TypeError, ValueError):
-                return None
-
-        rounds_int = i("num_rounds")
+            val = n(key)
+            return None if val is None else int(val)
 
         return cls(
             company=s("company"),
@@ -195,16 +189,19 @@ class Candidate:
             last_funding_usd=n("last_funding_usd"),
             last_funding_type=s("last_funding_type"),
             total_funding_usd=n("total_funding_usd"),
-            num_rounds=rounds_int,
+            num_rounds=i("num_rounds"),
             investors=s("investors"),
-            nyc_proof=s("nyc_proof"),
-            nyc_headcount_estimate=i("nyc_headcount_estimate"),
             nyc_open_roles_estimate=i("nyc_open_roles_estimate"),
-            nyc_estimate_basis=s("nyc_estimate_basis"),
-            signals=[str(x) for x in (raw.get("signals") or [])],
+            nyc_evidence=s("nyc_evidence"),
+            nyc_angle=s("nyc_angle") or "none",
+            keyword_hits=[str(k) for k in (raw.get("keyword_hits") or []) if str(k).strip()],
+            source_handle=s("source_handle"),
             signal_notes=s("signal_notes"),
-            source_urls=[str(u) for u in (raw.get("source_urls") or []) if str(u).startswith("http")],
+            source_urls=[
+                str(u) for u in (raw.get("source_urls") or []) if str(u).startswith("http")
+            ],
             lane=lane,
+            mode=mode,
         )
 
     @property
@@ -233,20 +230,17 @@ class Candidate:
             "total_funding_usd": self.total_funding_usd,
             "num_rounds": self.num_rounds,
             "investors": self.investors,
-            "nyc_proof": self.nyc_proof,
-            "nyc_headcount_estimate": self.nyc_headcount_estimate,
             "nyc_open_roles_estimate": self.nyc_open_roles_estimate,
-            "nyc_estimate_basis": self.nyc_estimate_basis,
-            "signals": self.signals,
+            "nyc_evidence": self.nyc_evidence,
+            "nyc_angle": self.nyc_angle,
+            "fit_hint": self.fit_hint,
+            "keyword_hits": self.keyword_hits,
+            "source_handle": self.source_handle,
             "signal_notes": self.signal_notes,
             "source_urls": self.source_urls,
+            "mode": self.mode,
             "lane": self.lane,
-            "signal_strength": self.signal_strength,
-            "score_notes": self.score_notes,
-            "predicted_fit": self.predicted_fit,
-            "predicted_fit_reason": self.predicted_fit_reason,
-            "predicted_fit_flags": self.predicted_fit_flags,
-            "predicted_fit_components": self.predicted_fit_components,
+            "qualify_reason": self.qualify_reason,
             "identity_key": self.key,
         }
 
@@ -274,55 +268,3 @@ class Candidate:
             "Number of Funding Rounds": "" if self.num_rounds is None else str(self.num_rounds),
             "Top 5 Investors": self.investors,
         }
-
-
-def score(cand: Candidate) -> Candidate:
-    """Compute Signal Strength in place and return the candidate.
-
-    Signal Strength answers only "is this worth handing to intake". It is not
-    Fit Score — crm-core's scoring lane owns that and must never see this number.
-    """
-    cfg = signals_config()
-    weights = cfg["signals"]
-    penalties = cfg["penalties"]
-    research = research_config()
-    excluded = {i.lower() for i in research["exclusions"]["industries"]}
-    flag_terms = [t.lower() for t in research["exclusions"]["flagOnly"]]
-
-    total = 0
-    notes: list[str] = []
-
-    for name in cand.signals:
-        spec = weights.get(name)
-        if not spec:
-            notes.append(f"unknown signal '{name}' ignored")
-            continue
-        weight = int(spec["weight"])
-        # A funding signal only counts at a size that actually implies space.
-        if name == "funding_round":
-            minimum = spec.get("minAmountUsd")
-            if minimum and cand.last_funding_usd is not None and cand.last_funding_usd < minimum:
-                notes.append(
-                    f"funding_round below ${int(minimum):,} threshold — not counted"
-                )
-                continue
-        total += weight
-        notes.append(f"+{weight} {name}")
-
-    if not cand.nyc_proof:
-        total += penalties["no_nyc_proof"]
-        notes.append(f"{penalties['no_nyc_proof']} no NYC proof")
-
-    industries_low = cand.industries.lower()
-    if any(bad in industries_low for bad in excluded):
-        total += penalties["excluded_industry"]
-        notes.append(f"{penalties['excluded_industry']} excluded industry")
-
-    haystack = f"{cand.industries} {cand.one_liner} {cand.signal_notes}".lower()
-    hit = [t for t in flag_terms if t in haystack]
-    if hit:
-        notes.append(f"flag: {', '.join(hit)} — score agent decides, not us")
-
-    cand.signal_strength = max(0, min(100, total))
-    cand.score_notes = notes
-    return cand
