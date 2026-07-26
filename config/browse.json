@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "norman.research.browse.v1",
+  "note": "Sources that need JD's logged-in Chrome. The browser gets past the paywall; Grok reads the page. Add a URL here and it runs — no code change.",
+
+  "settleSeconds": 3.0,
+  "restBetweenPagesSeconds": 6.0,
+  "maxPagesPerRun": 12,
+
+  "sources": [
+    {
+      "id": "cb_nyc_rounds",
+      "enabled": true,
+      "label": "Crunchbase — recent NYC funding rounds",
+      "mode": "funding",
+      "multiMode": false,
+      "limit": 20,
+      "url": "https://www.crunchbase.com/discover/funding_rounds",
+      "note": "DISCOVERY ONLY — finds companies not yet on the board. Enrichment of existing companies stays with crm-core's crm_crunchbase_agent.py; this lane must never write funding fields it owns. Replace this URL with your own saved Crunchbase search (NYC + last 30 days + Series A-C) and paste it here."
+    },
+    {
+      "id": "cb_nyc_companies",
+      "enabled": false,
+      "label": "Crunchbase — NYC company search",
+      "mode": "funding",
+      "multiMode": false,
+      "limit": 20,
+      "url": "https://www.crunchbase.com/discover/organization.companies",
+      "note": "Enable once you have a saved search URL worth running daily."
+    },
+
+    {
+      "id": "substack_inbox",
+      "enabled": true,
+      "label": "Substack — your subscribed inbox",
+      "mode": "funding",
+      "multiMode": true,
+      "limit": 15,
+      "url": "https://substack.com/inbox",
+      "note": "Reads the newsletters you actually pay for. multiMode is on because a single issue can carry funding, office, hiring, and founder signals at once."
+    },
+    {
+      "id": "substack_notes",
+      "enabled": false,
+      "label": "Substack — notes feed",
+      "mode": "funding",
+      "multiMode": true,
+      "limit": 10,
+      "url": "https://substack.com/notes",
+      "note": "Noisier than the inbox. Turn on if the inbox lane proves worth it."
+    }
+  ]
+}

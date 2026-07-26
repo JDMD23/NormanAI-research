@@ -112,6 +112,14 @@ def response_schema() -> dict[str, Any]:
                             "type": ["string", "null"],
                             "description": "X handle that surfaced this, when it came from a post.",
                         },
+                        "mode": {
+                            "type": ["string", "null"],
+                            "enum": [
+                                "funding", "office_expansion",
+                                "hiring_growth", "founder_language", None,
+                            ],
+                            "description": "Which category this signal belongs to. Leave null unless the source covers several — search lanes set it from the lane itself.",
+                        },
                         "signal_notes": {"type": "string"},
                         "source_urls": {"type": "array", "items": {"type": "string"}},
                     },
@@ -201,7 +209,10 @@ class Candidate:
                 str(u) for u in (raw.get("source_urls") or []) if str(u).startswith("http")
             ],
             lane=lane,
-            mode=mode,
+            # A multi-topic source (a newsletter) can tell us which bucket a
+            # company belongs in; a single-intent search lane cannot be
+            # overridden by the model.
+            mode=s("mode") or mode,
         )
 
     @property
