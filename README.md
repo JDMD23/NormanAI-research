@@ -59,6 +59,11 @@ echo 'XAI_API_KEY=xai-...' >> ~/.normanai/.env   # same .env ladder as crm-core
 python3 scripts/research_probe.py                # confirms the API, ~5 seconds
 ```
 
+While you're waiting on either, **`docs/grok-automations.md`** has the same four
+searches written as Grok Automations — paste-ready, scheduled, emailed to you.
+No API key, no code. It tests whether the searches find good companies before
+you spend anything on the pipeline that writes them to Notion.
+
 ## Run
 
 One command does the day:
