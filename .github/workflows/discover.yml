@@ -1,29 +1,22 @@
-name: Discovery run
+name: Daily discovery
 
-# Research is the only NormanAI lane that needs no logged-in browser — it talks
-# to the xAI API and nothing else. That is why it can run here instead of on
-# JD's Mac alongside the Crunchbase/LinkedIn/Careers lanes.
+# The search half of the daily run. No browser here — Crunchbase and Substack
+# need JD's logged-in Chrome, so those lanes are skipped automatically and the
+# full run lives on the Mac (see docs/scheduling.md).
 #
-# This workflow produces the intake CSV as an artifact. It deliberately does NOT
-# write Notion: crm_intake.py in NormanAI-crm-core is the single writer, and
-# promoting a batch stays a human-triggered step.
+# CI does NOT promote. It produces the brief and the CSV as artifacts, which
+# makes it a free canary: if the candidates look wrong, the board is untouched.
 
 on:
   schedule:
-    # 06:30, 10:00, 13:00, 16:00, 19:00 ET → UTC-4 (EDT).
-    # NOTE: cron is fixed-UTC, so these shift by an hour under EST. That is
-    # acceptable for a discovery sweep; do not "fix" it with a second schedule.
+    # 06:30 and 13:00 ET → UTC-4 (EDT). Fixed-UTC cron shifts an hour under
+    # EST; acceptable for a discovery sweep, don't add a second schedule.
     - cron: "30 10 * * 1-5"
-    - cron: "0 14,17,20,23 * * 1-5"
+    - cron: "0 17 * * 1-5"
   workflow_dispatch:
     inputs:
-      lane:
-        description: "Which lanes to run"
-        type: choice
-        options: ["all", "x", "web"]
-        default: "all"
       dry_run:
-        description: "Dry run (no CSV emitted, nothing marked as sent)"
+        description: "Dry run (no CSV, nothing marked as sent)"
         type: boolean
         default: false
 
@@ -39,7 +32,7 @@ jobs:
           python-version: "3.11"
 
       # The seen-store is what stops the same company being handed over twice.
-      # Without it every scheduled run re-emits the same board.
+      # Without it every scheduled run re-emits the same companies.
       - name: Restore seen-store
         uses: actions/cache@v4
         with:
@@ -52,26 +45,24 @@ jobs:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: python3 scripts/research_probe.py
 
-      - name: Run discovery
+      - name: Daily run (search lanes only)
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python3 scripts/research_run.py --lane "${{ inputs.lane || 'all' }}" --dry-run
+            python3 scripts/daily.py --no-browser --dry-run
           else
-            python3 scripts/research_run.py --lane "${{ inputs.lane || 'all' }}" --write --yes
+            python3 scripts/daily.py --no-browser --write --yes
           fi
 
-      - name: Upload intake CSV and evidence
+      - name: Upload brief and intake CSV
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: research-intake
+          name: daily-brief
           path: |
             out/
-            state/research_latest.json
+            state/latest-run.json
           if-no-files-found: ignore
           retention-days: 30

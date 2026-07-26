@@ -62,13 +62,23 @@ python3 scripts/research_probe.py
 
 ## Run
 
+One command does the day:
+
 ```bash
-python3 scripts/research_run.py --dry-run                     # all four modes
-python3 scripts/research_run.py --mode funding --dry-run      # one mode
-python3 scripts/research_run.py --dry-run --show-rejects      # see what was filtered and why
-python3 scripts/research_run.py --write --yes                 # emit the intake CSV
-python3 scripts/research_run.py --write --yes --promote       # ...and create the rows
-python3 scripts/research_run.py --write --yes --promote --loop
+python3 scripts/daily.py --dry-run                    # look first
+python3 scripts/daily.py --write --yes --promote      # brief + rows in Notion
+```
+
+It walks both lanes, merges them, and writes **one** brief and **one** intake
+call. The browser half is skipped automatically off a Mac, so the same command
+works on the cron host and in CI.
+
+Single lanes, when you're tuning one:
+
+```bash
+python3 scripts/research_run.py --mode office_expansion --dry-run   # search only
+python3 scripts/research_browse.py --source cb_nyc_rounds --dry-run # browser only
+python3 scripts/daily.py --dry-run --show-rejects                   # why things were filtered
 ```
 
 `--promote` invokes crm-core's `crm_intake.py` on the CSV, so companies reach
@@ -86,7 +96,10 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 | `config/modes.json` | The four modes, their postures, keywords, and the watchlist |
 | `config/sources.json` | Lanes — each declares its mode; cadence |
 | `config/research.json` | Grok settings, caps, promotion, dedup |
-| `scripts/research_run.py` | The run: discover → qualify → dedup → emit → promote |
+| `scripts/daily.py` | **The scheduled run** — both lanes, one brief |
+| `scripts/research_run.py` | Grok search lanes (X + web) |
+| `scripts/research_browse.py` | Browser lanes (Crunchbase + Substack) |
+| `scripts/lib/pipeline.py` | The shared tail: qualify → dedup → emit → brief |
 | `scripts/research_probe.py` | One live call to verify the xAI request shape |
 | `scripts/lib/qualify.py` | The broad/tight rules |
 | `scripts/lib/discover.py` | Lane execution and the two prompts |
@@ -95,16 +108,18 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 
 ## Scheduling
 
-`.github/workflows/discover.yml` runs 5× each weekday and uploads the CSV as an
-artifact — discovery only, no `--promote`, so a bad sweep can't touch the board.
-
-The full discover→promote loop needs this repo, the crm-core checkout, and
-`NOTION_TOKEN` co-located, which is the Mac. It belongs in the Codex registry
-next to the other lanes:
+The full run needs this repo, the crm-core checkout, `NOTION_TOKEN`, and your
+logged-in Chrome — all on the Mac. One Codex registry entry:
 
 ```
-research-discover   python3 scripts/research_run.py --write --yes --promote
+research-daily   30 6 * * 1-5   python3 scripts/daily.py --write --yes --promote
 ```
+
+CI runs the search half twice a weekday **without** `--promote` and uploads the
+brief as an artifact — a free canary that can't touch the board.
+
+Full detail, including exit codes and how this orders against the enrichment
+lanes: **`docs/scheduling.md`**.
 
 ## Rules
 

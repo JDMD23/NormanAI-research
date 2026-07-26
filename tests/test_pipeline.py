@@ -5,7 +5,7 @@ from lib.sinks import write_intake_csv
 
 
 def test_dedupe_within_merges_evidence_and_keeps_strongest():
-    from research_run import dedupe_within
+    from lib.pipeline import dedupe_within
 
     # The tighter mode is the more specific claim and should win the merge.
     broad = Candidate(
@@ -41,7 +41,7 @@ def test_dedupe_within_merges_evidence_and_keeps_strongest():
 
 
 def test_dedupe_keeps_genuinely_different_companies():
-    from research_run import dedupe_within
+    from lib.pipeline import dedupe_within
 
     a = Candidate(company="Acme", website="https://acme.com")
     b = Candidate(company="Zenith", website="https://zenith.com")

@@ -1,0 +1,111 @@
+# Scheduling — making it a daily scraper
+
+One command does the whole day:
+
+```bash
+python3 scripts/daily.py --write --yes --promote
+```
+
+It walks both lanes, merges everything, writes **one** brief, and creates the
+Notion rows through `crm_intake.py`. That's the thing to schedule.
+
+---
+
+## Where it has to run
+
+The two lanes have different requirements, and that decides the host.
+
+| Lane | Needs | Runs on |
+|------|-------|---------|
+| Grok search (9 lanes) | `XAI_API_KEY` | Anywhere — Mac, CI, a server |
+| Crunchbase + Substack | JD's logged-in Chrome | The Mac, only |
+| Promotion to Notion | crm-core checkout + `NOTION_TOKEN` | The Mac, only |
+
+So the **full** run — both lanes, writing to Notion — lives on the Mac,
+alongside the Codex jobs that already drive the enrichment lanes. `daily.py`
+skips the browser half automatically when Chrome isn't reachable, which is why
+the same command works in CI without a separate script.
+
+---
+
+## On the Mac (the real daily run)
+
+Add one entry to the Codex scheduler registry, next to `crm-core-crunchbase`
+and the rest:
+
+| Job id | Schedule (ET) | argv |
+|--------|---------------|------|
+| `research-daily` | `30 6 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+
+Working directory is the `NormanAI-research` checkout. It needs `XAI_API_KEY`
+and `NOTION_TOKEN` in the environment — the loader reads the same `.env` ladder
+crm-core uses, so one file on the host serves both repos.
+
+Plain cron works too:
+
+```cron
+30 6 * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
+```
+
+**Exit codes:** `0` is a clean run — including a run that found nothing.
+`1` means a source was blocked (logged out, captcha). That distinction exists
+so a wrapper can alert on it; a logged-out browser otherwise looks exactly
+like a quiet news day.
+
+### Ordering against the enrichment lanes
+
+Run research **before** the enrichment lanes wake up. Intake creates rows at
+`Status=Research` with the Need-\* markers set, so Crunchbase → Careers →
+LinkedIn pick them up on their next tick. A 06:30 research run feeds the
+09:15 careers sync the same morning.
+
+Research and the browser-driven enrichment lanes both want the one Chrome
+window. They take turns — `scripts/lib/chrome.py` holds the same kind of
+exclusive `flock` lease `linkedin_aggregate` uses — but a research run that
+starts while LinkedIn holds the lease will skip its browser half rather than
+wait. Give it its own slot.
+
+---
+
+## In CI (the canary)
+
+`.github/workflows/discover.yml` runs `daily.py --no-browser --write --yes`
+twice each weekday and uploads the brief and CSV as artifacts. It deliberately
+does **not** pass `--promote`, so the board is never touched by a run nobody
+looked at. If the Action's candidates look wrong, you've learned that for free.
+
+Set `XAI_API_KEY` in repo secrets (and `NOTION_TOKEN` if you want the
+read-only pre-filter that skips companies already on the board).
+
+---
+
+## More often than daily?
+
+`config/sources.json` documents a 5×/weekday cadence for the search lanes.
+That's a scheduling choice, not a code one — add more Codex entries pointing at
+`daily.py --no-browser --write --yes --promote` at 10:00 / 13:00 / 16:00 / 19:00
+and keep the full both-lane run at 06:30.
+
+Keep the browser lane once a day. It's the slow, expensive half, and Crunchbase
+and Substack don't change fast enough to justify more.
+
+**Cost:** `x_search` and `web_search` bill about $5 per 1,000 calls. Nine
+searches a run, five runs a weekday, is roughly 950 calls a month — under $5,
+plus tokens. `caps.maxSearchesPerRun` is the ceiling that keeps a runaway loop
+from becoming a bill.
+
+---
+
+## What lands where
+
+```
+out/brief-2026-07-26.md      ← the page you read
+out/intake-2026-07-26.csv    ← what went to crm_intake.py
+out/evidence-2026-07-26.json ← full receipts, for auditing a bad batch
+state/latest-run.json        ← counts, per-source outcomes, API usage
+state/research.db            ← the seen-store (never hand a company over twice)
+```
+
+`state/` and `out/` are gitignored. The seen-store is the one file worth
+keeping across runs — delete it and the next run re-emits everything it has
+ever found.
