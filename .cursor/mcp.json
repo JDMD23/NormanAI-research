@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "xai-search": {
+      "command": "npx",
+      "args": ["-y", "@kicito/xai-search-mcp"],
+      "env": {
+        "XAI_API_KEY": "${env:XAI_API_KEY}"
+      }
+    }
+  }
+}

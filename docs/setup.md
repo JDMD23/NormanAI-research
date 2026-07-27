@@ -57,6 +57,22 @@ all; it only pays tokens, because Grok is reading a page we already fetched.
 `caps.maxSearchesPerRun` in `config/research.json` is the ceiling that stops a
 bug from becoming a bill.
 
+### Cursor MCP (interactive X search in Agent)
+
+Scheduled research uses `scripts/lib/grok.py`. For **interactive** scans in
+Cursor (e.g. “what did these 12 accounts post in 24h?”), this repo ships
+`.cursor/mcp.json` with the xAI search MCP — same API key, still no X developer
+account:
+
+| Client | What to do |
+|---|---|
+| **Cursor Desktop** | Set `XAI_API_KEY` in your environment (or Cursor secrets). Restart Cursor. Settings → MCP → `xai-search` should go green. |
+| **Cursor Cloud Agents** | Dashboard does **not** read `.cursor/mcp.json`. Add the same server under [cursor.com/agents](https://cursor.com/agents) → MCP (or Team → Integrations & MCP): command `npx`, args `-y @kicito/xai-search-mcp`, env `XAI_API_KEY=<your key>`. |
+
+Do **not** add the official X hosted MCP (`api.x.com/mcp`) for this workflow —
+that needs an X developer app and paid X API. Grok `x_search` is the sanctioned
+path; this MCP is just that path exposed to the Agent.
+
 ---
 
 ## 2. Crunchbase saved search
