@@ -9,7 +9,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from lib import chrome
 from lib.browser_coordination import (
+    BrowserLeaseUnavailable,
     DEFAULT_BROWSER_LOCK,
     DEFAULT_CRUNCHBASE_BUDGET,
     DailyCrunchbaseBudget,
@@ -53,6 +55,23 @@ def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> No
         with pytest.raises(RuntimeError, match="unavailable"):
             with SharedBrowserLease(lock):
                 pass
+
+
+def test_chrome_lease_translates_shared_contention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches Chrome reverting to a private lock or leaking protocol errors."""
+    lock = tmp_path / "browser.lock"
+    monkeypatch.setattr(
+        chrome, "SharedBrowserLease", lambda: SharedBrowserLease(lock)
+    )
+
+    with SharedBrowserLease(lock):
+        with pytest.raises(chrome.ChromeUnavailable) as caught:
+            with chrome.lease():
+                pass
+
+    assert isinstance(caught.value.__cause__, BrowserLeaseUnavailable)
 
 
 def test_concurrent_budget_claims_never_exceed_40(tmp_path: Path) -> None:

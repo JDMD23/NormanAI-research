@@ -132,8 +132,10 @@ def test_event_key_matches_the_canonical_core_contract_fixture() -> None:
 def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     tmp_path: Path,
 ) -> None:
+    """Catches transitions that exist only in memory or mark retries terminal."""
     event_key = hashlib.sha256(b"event").hexdigest()
-    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    path = tmp_path / "ledger.json"
+    ledger = FundingWatcherLedger(path)
     ledger.observe(event_key, observed_at="2026-07-29T14:00:00+00:00")
     ledger.mark_handoff_pending(
         event_key, run_id="run-1", observed_at="2026-07-29T14:01:00+00:00"
@@ -141,6 +143,8 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     ledger.mark_retryable(
         event_key, reason="timeout", observed_at="2026-07-29T14:02:00+00:00"
     )
+    ledger = FundingWatcherLedger(path)
+    assert ledger.events[event_key]["state"] == "retryable"
     assert not ledger.is_terminal(event_key)
     ledger.mark_handoff_pending(
         event_key, run_id="run-2", observed_at="2026-07-29T14:03:00+00:00"
@@ -151,6 +155,8 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
         page_id="page-1",
         observed_at="2026-07-29T14:04:00+00:00",
     )
+    ledger = FundingWatcherLedger(path)
+    assert ledger.events[event_key]["state"] == "terminal"
     assert ledger.is_terminal(event_key)
 
     with pytest.raises(ValueError, match="terminal"):
@@ -169,8 +175,10 @@ def test_invalid_lifecycle_transition_is_rejected(tmp_path: Path) -> None:
 
 
 def test_immutable_receipt_refuses_overwrite(tmp_path: Path) -> None:
+    """Catches receipts moving outside receipts/<runId>.json or overwriting."""
     payload = {"runId": "20260729T140000Z", "status": "complete"}
     receipt = write_immutable_receipt(tmp_path, payload)
+    assert receipt == tmp_path / "receipts" / "20260729T140000Z.json"
     assert json.loads(receipt.read_text(encoding="utf-8")) == payload
     with pytest.raises(FileExistsError):
         write_immutable_receipt(tmp_path, payload)
@@ -192,6 +200,7 @@ def test_new_york_slot_normalizes_timezone() -> None:
 
 
 def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
+    """Catches legacy mutation, key loss, or incomplete migration receipts."""
     legacy = tmp_path / "legacy"
     research = tmp_path / "research"
     legacy.mkdir()
@@ -199,7 +208,13 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     legacy_path.write_text(
         json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
     )
-    before = legacy_path.read_bytes()
+    legacy_note = legacy / "operator-note.txt"
+    legacy_note.write_text("leave this file alone\n", encoding="utf-8")
+    before = {
+        path.relative_to(legacy): path.read_bytes()
+        for path in sorted(legacy.rglob("*"))
+        if path.is_file()
+    }
 
     first = migrate_legacy_state(
         legacy, research, expected_source_url=SOURCE
@@ -209,7 +224,26 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     )
 
     assert first == second
-    assert legacy_path.read_bytes() == before
+    assert {
+        path.relative_to(legacy): path.read_bytes()
+        for path in sorted(legacy.rglob("*"))
+        if path.is_file()
+    } == before
+    assert first == {
+        "schemaVersion": "norman.research.funding_legacy_migration.v1",
+        "legacyPath": str(legacy_path),
+        "researchPath": str(research / "ledger.json"),
+        "sourceUrl": SOURCE,
+        "counts": {
+            "events": 189,
+            "baseline": 179,
+            "created": 10,
+            "bootstraps": 1,
+        },
+        "eventKeyDigest": (
+            "e314bbac273ab87ed46962916b35827ec50f52c78be9b81b90b4c65042c074ad"
+        ),
+    }
     assert first["counts"] == {
         "events": 189,
         "baseline": 179,
@@ -257,6 +291,11 @@ def test_migration_accepts_legacy_created_rows_without_repeated_source(
         lambda payload: payload["bootstraps"].update(
             {"https://www.crunchbase.com/discover/saved/other/id": {}}
         ),
+        lambda payload: next(
+            record
+            for record in payload["events"].values()
+            if record["state"] == "created"
+        ).update(state="baseline"),
         lambda payload: next(iter(payload["events"].values()))["details"].update(
             source_url=SOURCE.replace("main-funding", "other-funding")
         ),
@@ -268,6 +307,7 @@ def test_migration_accepts_legacy_created_rows_without_repeated_source(
 def test_migration_mismatch_aborts_before_writing(
     tmp_path: Path, mutate
 ) -> None:
+    """Catches validation that writes before rejecting malformed legacy state."""
     legacy = tmp_path / "legacy"
     research = tmp_path / "research"
     legacy.mkdir()
