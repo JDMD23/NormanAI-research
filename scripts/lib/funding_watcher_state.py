@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+from contextlib import contextmanager
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -23,8 +25,11 @@ EVENT_STATES = {"observed", "handoff_pending", "retryable", "terminal"}
 TERMINAL_OUTCOMES = {
     "baseline",
     "created",
-    "duplicate",
     "queued_existing",
+    "duplicate_event",
+    "rejected_identity",
+    "ambiguous_review",
+    "duplicate",
     "rejected_parse",
     "failed_terminal",
 }
@@ -232,6 +237,30 @@ def new_york_slot(
     if local.hour not in set(schedule_hours):
         return None
     return local.replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+@contextmanager
+def exclusive_run_lock(path: Path):
+    """Yield whether a stable non-blocking process lock was acquired."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    acquired = False
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def migrate_legacy_state(
