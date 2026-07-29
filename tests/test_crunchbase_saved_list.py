@@ -218,8 +218,8 @@ def test_browser_refuses_non_saved_list_navigation() -> None:
 def test_chrome_transport_uses_safe_chrome_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     from lib import chrome
     monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
-    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: "10|1|10|3")
-    assert ChromeSavedListTransport().open_dedicated_tab(SOURCE.url) == "window-10:tab-3"
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: "10|user-tab|10|watcher-tab")
+    assert ChromeSavedListTransport().open_dedicated_tab(SOURCE.url) == "window-10:tab-watcher-tab"
 
 
 def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,7 +227,8 @@ def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(
 
     calls: list[str] = []
     monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
-    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or "10|1|10|3")
+    responses = iter(["10|user-tab|10|watcher-tab", "closed", "restored"])
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or next(responses))
     transport = ChromeSavedListTransport()
     tab_ref = transport.open_dedicated_tab(SOURCE.url)
     transport.close_dedicated_tab(tab_ref)
@@ -235,5 +236,61 @@ def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(
 
     assert "make new tab at end of tabs of front window" in calls[0]
     assert "repeat with candidateWindow" not in calls[0]
-    assert "close tab 3 of window id 10" in calls[1]
-    assert "set active tab index of window id 10 to 1" in calls[2]
+    assert 'close tab id "watcher-tab" of window id 10' in calls[1]
+    assert 'tab id "user-tab" of window id 10' in calls[2]
+
+
+def test_chrome_transport_uses_stable_ids_when_tab_insertion_changes_indexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib import chrome
+
+    calls: list[str] = []
+    responses = iter(["10|user-tab|10|watcher-tab", "closed", "restored"])
+    monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or next(responses))
+    transport = ChromeSavedListTransport()
+    tab_ref = transport.open_dedicated_tab(SOURCE.url)
+
+    # A user opens or closes tabs while the watcher runs, shifting all indexes.
+    transport.close_dedicated_tab(tab_ref)
+    transport.restore_previous_tab()
+
+    assert 'close tab id "watcher-tab" of window id 10' in calls[1]
+    assert 'tab id "user-tab" of window id 10' in calls[2]
+    assert "close tab 3" not in calls[1]
+    assert "active tab index of window id 10 to 1" not in calls[2]
+
+
+def test_chrome_transport_does_not_select_an_unrelated_tab_when_prior_tab_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib import chrome
+
+    calls: list[str] = []
+    responses = iter(["10|user-tab|10|watcher-tab", "closed", "previous_tab_missing"])
+    monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or next(responses))
+    transport = ChromeSavedListTransport()
+    tab_ref = transport.open_dedicated_tab(SOURCE.url)
+    transport.close_dedicated_tab(tab_ref)
+
+    with pytest.raises(RuntimeError, match="previous Chrome tab no longer exists"):
+        transport.restore_previous_tab()
+
+    assert 'tab id "user-tab" of window id 10' in calls[2]
+    assert "active tab index of window id 10 to 1" not in calls[2]
+
+
+def test_chrome_transport_does_not_close_a_replacement_when_watcher_tab_was_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib import chrome
+
+    calls: list[str] = []
+    responses = iter(["10|user-tab|10|watcher-tab", "owned_tab_missing", "restored"])
+    monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or next(responses))
+    transport = ChromeSavedListTransport()
+    tab_ref = transport.open_dedicated_tab(SOURCE.url)
+
+    # The user closes the watcher tab and Chrome reuses its old numeric index.
+    transport.close_dedicated_tab(tab_ref)
+    transport.restore_previous_tab()
+
+    assert 'if exists tab id "watcher-tab" of window id 10' in calls[1]
+    assert "close tab 3" not in calls[1]

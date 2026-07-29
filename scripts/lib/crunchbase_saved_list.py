@@ -370,28 +370,28 @@ const filters=filterContainers.map(container=>{const label=text(container.queryS
 const next=document.querySelector(".page-button-next"); return JSON.stringify({pageUrl:location.href,pageTitle:document.title,readyState:document.readyState,gridRowCount:rowElements.length,pageText:bodyText.slice(0,12000),captchaDetected:Boolean(document.querySelector('#px-captcha,iframe[src*="captcha" i],iframe[src*="recaptcha" i],iframe[src*="hcaptcha" i],[class*="captcha" i],[id*="captcha" i],[data-sitekey]')),securityChallengeDetected:Boolean(document.querySelector('#challenge-form,#cf-challenge-running,[id^="cf-chl-"],[class*="cf-chl-"],script[src*="/cdn-cgi/challenge-platform/"],script[src*="perimeterx"]')),title:text(document.querySelector("[data-test='saved-search-name'],[data-testid='saved-search-name'],h1")),resultType:bodyText.match(/\b(Companies)\b/)?.[1]||"",newAtTop:bodyText.includes("NEW AT TOP"),filters,resultCount:Number(bodyText.match(/(?:of\s+)?([\d,]+)\s+results/i)?.[1]?.replace(/,/g,"")||0),hasNext:Boolean(next&&!next.className.includes("disabled")&&!next.className.includes("no-events")),rows}); })()'''
 
 
-def _tab_ref(value: str) -> tuple[int, int]:
-    match = re.fullmatch(r"window-(\d+):tab-(\d+)", value or "")
+def _tab_ref(value: str) -> tuple[int, str]:
+    match = re.fullmatch(r"window-(\d+):tab-([A-Za-z0-9_-]+)", value or "")
     if not match: raise ValueError(f"invalid Chrome tab reference: {value}")
-    return int(match.group(1)), int(match.group(2))
+    return int(match.group(1)), match.group(2)
 
 
 class ChromeSavedListTransport:
     def __init__(self, *, timeout_seconds: int = 60, sleeper: Callable[[float], None] = time.sleep):
         self.timeout_seconds, self.sleeper = timeout_seconds, sleeper
-        self._previous_tab: tuple[int, int] | None = None
-        self._owned_tab: tuple[int, int, str] | None = None
+        self._previous_tab: tuple[int, str] | None = None
+        self._owned_tab: tuple[int, str, str] | None = None
     def _osascript(self, script: str) -> str: return chrome.run_osascript(script, timeout=self.timeout_seconds)
     def open_dedicated_tab(self, url: str) -> str:
         source_url = validate_saved_list_url(url); chrome.ensure_chrome_running(); literal = chrome.applescript_string_literal(source_url)
-        script = 'tell application "Google Chrome"\n' + f' set sourceUrl to {literal}\n set previousWindowId to id of front window\n set previousTabIndex to active tab index of front window\n set targetWindowId to id of front window\n make new tab at end of tabs of front window\n set targetTabIndex to count of tabs of front window\n set URL of tab targetTabIndex of window id targetWindowId to sourceUrl\n set active tab index of window id targetWindowId to targetTabIndex\n set index of window id targetWindowId to 1\n return (previousWindowId as text) & "|" & (previousTabIndex as text) & "|" & (targetWindowId as text) & "|" & (targetTabIndex as text)\nend tell'
+        script = 'tell application "Google Chrome"\n' + f' set sourceUrl to {literal}\n set previousWindowId to id of front window\n set previousTabId to id of active tab of front window\n set targetWindowId to id of front window\n make new tab at end of tabs of front window\n set targetTabIndex to count of tabs of front window\n set URL of tab targetTabIndex of window id targetWindowId to sourceUrl\n set active tab index of window id targetWindowId to targetTabIndex\n set index of window id targetWindowId to 1\n set targetTabId to id of tab targetTabIndex of window id targetWindowId\n return (previousWindowId as text) & "|" & (previousTabId as text) & "|" & (targetWindowId as text) & "|" & (targetTabId as text)\nend tell'
         parts = self._osascript(script).split("|")
-        if len(parts) != 4 or any(not part.isdigit() for part in parts): raise RuntimeError("Chrome returned an invalid saved-list tab reference")
-        previous_window, previous_tab, target_window, target_tab = map(int, parts); self._previous_tab = (previous_window, previous_tab); self._owned_tab = (target_window, target_tab, source_url)
+        if len(parts) != 4 or not parts[0].isdigit() or not parts[2].isdigit() or not parts[1] or not parts[3]: raise RuntimeError("Chrome returned an invalid saved-list tab reference")
+        previous_window, previous_tab, target_window, target_tab = int(parts[0]), parts[1], int(parts[2]), parts[3]; self._previous_tab = (previous_window, previous_tab); self._owned_tab = (target_window, target_tab, source_url)
         return f"window-{target_window}:tab-{target_tab}"
     def evaluate(self, tab_ref: str, javascript: str) -> str:
-        window_id, tab_index = _tab_ref(tab_ref); literal = chrome.applescript_string_literal(javascript)
-        return self._osascript(f'tell application "Google Chrome"\n tell tab {tab_index} of window id {window_id}\n  set jsResult to execute javascript {literal}\n end tell\nend tell\nreturn jsResult')
+        window_id, tab_id = _tab_ref(tab_ref); literal = chrome.applescript_string_literal(javascript); tab_literal = chrome.applescript_string_literal(tab_id)
+        return self._osascript(f'tell application "Google Chrome"\n tell tab id {tab_literal} of window id {window_id}\n  set jsResult to execute javascript {literal}\n end tell\nend tell\nreturn jsResult')
     def advance_to_next_page(self, tab_ref: str) -> bool:
         raw = self.evaluate(tab_ref, 'JSON.stringify({currentUrl:location.href,nextUrl:(document.querySelector(".page-button-next")?.href||""),first:document.querySelector(".results-container grid-row a[href*=\'/organization/\']")?.href||""})')
         try: state = json.loads(raw)
@@ -411,18 +411,23 @@ class ChromeSavedListTransport:
     def reset_to_source(self, tab_ref: str, url: str) -> None:
         source_url = validate_saved_list_url(url); self.evaluate(tab_ref, f"if (window.location.href !== {json.dumps(source_url)}) {{ window.location.href = {json.dumps(source_url)}; }} 'ok';")
     def close_dedicated_tab(self, tab_ref: str) -> None:
-        window_id, tab_index = _tab_ref(tab_ref)
-        if self._owned_tab is None or self._owned_tab[:2] != (window_id, tab_index):
+        window_id, tab_id = _tab_ref(tab_ref)
+        if self._owned_tab is None or self._owned_tab[:2] != (window_id, tab_id):
             raise RuntimeError("refusing to close a Chrome tab not owned by the saved-list reader")
+        tab_literal = chrome.applescript_string_literal(tab_id)
         try:
-            self._osascript(f'tell application "Google Chrome"\n if exists window id {window_id} then\n  if (count of tabs of window id {window_id}) >= {tab_index} then\n   close tab {tab_index} of window id {window_id}\n  end if\n end if\nend tell\nreturn "ok"')
+            self._osascript(f'tell application "Google Chrome"\n if exists tab id {tab_literal} of window id {window_id} then\n  close tab id {tab_literal} of window id {window_id}\n  return "closed"\n end if\nend tell\nreturn "owned_tab_missing"')
         finally:
             self._owned_tab = None
     def restore_previous_tab(self) -> None:
         if self._previous_tab is None: return
-        window_id, tab_index = self._previous_tab
-        try: self._osascript(f'tell application "Google Chrome"\n if exists window id {window_id} then\n  if (count of tabs of window id {window_id}) >= {tab_index} then\n   set active tab index of window id {window_id} to {tab_index}\n   set index of window id {window_id} to 1\n  end if\n end if\nend tell\nreturn "ok"')
-        finally: self._previous_tab = None
+        window_id, tab_id = self._previous_tab; tab_literal = chrome.applescript_string_literal(tab_id)
+        try:
+            result = self._osascript(f'tell application "Google Chrome"\n if exists tab id {tab_literal} of window id {window_id} then\n  set active tab index of window id {window_id} to index of tab id {tab_literal} of window id {window_id}\n  set index of window id {window_id} to 1\n  return "restored"\n end if\nend tell\nreturn "previous_tab_missing"')
+            if result != "restored":
+                raise RuntimeError("previous Chrome tab no longer exists")
+        finally:
+            self._previous_tab = None
 
 
 def _browser_block(payload: dict[str, Any]) -> tuple[str, str] | None:
