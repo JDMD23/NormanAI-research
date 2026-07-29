@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-from dataclasses import replace
+import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
+import funding_watcher
+from lib.browser_coordination import DailyCrunchbaseBudget
 from lib.crunchbase_saved_list import (
     CrunchbaseSavedListBlocked,
     CrunchbaseSavedListDrift,
@@ -145,12 +148,28 @@ def config(tmp_path: Path, *, enabled: bool = True) -> dict:
     return load_watcher_config(path)
 
 
-def core_result(request: dict, *, existing: bool = False) -> dict:
+def core_result(
+    request: dict,
+    *,
+    existing: bool = False,
+    write: bool = True,
+) -> dict:
+    request_digest = hashlib.sha256(
+        (
+            json.dumps(
+                request,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "schemaVersion": "norman.crm_core.funding_handoff_result.v1",
         "runId": request["runId"],
-        "requestDigest": "validated-by-client",
-        "mode": "write",
+        "requestDigest": request_digest,
+        "mode": "write" if write else "dry_run",
         "complete": True,
         "events": [
             {
@@ -177,7 +196,8 @@ def dependencies(
         browser=browser,
         budget=budget or FakeBudget(),
         ledger=ledger,
-        invoke_handoff=invoke or (lambda request, write: core_result(request)),
+        invoke_handoff=invoke
+        or (lambda request, write: core_result(request, write=write)),
         browser_lease=lambda: contextlib.nullcontext(),
         run_lock=lambda: contextlib.nullcontext(lock_acquired),
         notify=lambda names: None,
@@ -327,7 +347,8 @@ def test_dry_run_previews_new_event_without_mutating_ledger(
         tmp_path,
         FakeBrowser([row]),
         invoke=lambda request, write: (
-            calls.append((request, write)) or core_result(request)
+            calls.append((request, write))
+            or core_result(request, write=write)
         ),
     )
     before = dict(deps.ledger.events)
@@ -349,7 +370,7 @@ def test_live_check_records_pending_before_core_and_terminal_after(
 
     def invoke(request: dict, write: bool):
         assert deps.ledger.events[event_key]["state"] == "handoff_pending"
-        return core_result(request)
+        return core_result(request, write=write)
 
     deps = dependencies(tmp_path, FakeBrowser([row]), invoke=invoke)
     receipt = run_check(
@@ -379,7 +400,7 @@ def test_invalid_core_result_is_configuration_failure_but_remains_retryable(
     row = observation()
 
     def invoke(request: dict, write: bool):
-        result = core_result(request)
+        result = core_result(request, write=write)
         result["events"][0]["eventKey"] = "f" * 64
         return result
 
@@ -395,7 +416,7 @@ def test_existing_and_new_results_are_preserved(tmp_path: Path) -> None:
     first, second = observation(1), observation(2)
 
     def invoke(request: dict, write: bool):
-        result = core_result(request)
+        result = core_result(request, write=write)
         result["events"][1]["state"] = "queued_existing"
         result["events"][1]["reason"] = "existing"
         return result
@@ -525,6 +546,26 @@ def test_dry_bootstrap_does_not_record_state(tmp_path: Path) -> None:
     assert not deps.ledger.bootstrap_complete(SOURCE)
 
 
+def test_already_bootstrapped_does_not_touch_budget_or_browser(
+    tmp_path: Path,
+) -> None:
+    browser, budget = FakeBrowser([]), FakeBudget()
+    deps = dependencies(tmp_path, browser, budget=budget)
+    deps.ledger.mark_bootstrap_complete(SOURCE, NOW.isoformat())
+
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=True,
+        now=NOW,
+    )
+
+    assert receipt["status"] == "already_bootstrapped"
+    assert browser.calls == []
+    assert budget.claims == []
+
+
 def test_no_observations_is_complete_zero_change(tmp_path: Path) -> None:
     receipt = run_check(
         config(tmp_path),
@@ -535,3 +576,352 @@ def test_no_observations_is_complete_zero_change(tmp_path: Path) -> None:
     )
     assert receipt["status"] == "complete"
     assert receipt["counts"]["new_events"] == 0
+
+
+def test_retry_in_same_scheduled_slot_cannot_reserve_more_than_two_pages(
+    tmp_path: Path,
+) -> None:
+    row = observation()
+    budget = DailyCrunchbaseBudget(tmp_path / "shared-budget.json")
+
+    def retryable_core(request: dict, write: bool) -> dict:
+        raise RuntimeError("CRM retry")
+
+    browser = FakeBrowser([row])
+    deps = dependencies(
+        tmp_path,
+        browser,
+        budget=budget,
+        invoke=retryable_core,
+    )
+
+    first = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=True,
+    )
+    second = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=True,
+    )
+
+    assert first["status"] == "crm_retryable"
+    assert second["status"] == "budget_exhausted"
+    assert browser.calls == [2]
+    snapshot = budget.snapshot(NOW)
+    assert snapshot["used"] == 2
+    assert snapshot["lanes"] == {
+        "research-funding-watcher@2026-07-29T10:00:00-04:00": 2
+    }
+
+
+def test_check_rejects_incomplete_snapshot_before_diff_or_core(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict] = []
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser([observation(1), observation(2)], result_count=3),
+        invoke=lambda request, write: calls.append(request),
+    )
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "incomplete_snapshot_coverage"
+    assert calls == []
+    assert deps.ledger.events == {}
+
+
+def test_check_sends_only_nonterminal_event_keys(tmp_path: Path) -> None:
+    terminal, unseen = observation(1), observation(2)
+    deps = dependencies(tmp_path, FakeBrowser([terminal, unseen]))
+    terminal_key = funding_event_key(terminal)
+    deps.ledger.observe(terminal_key, observed_at=terminal.observed_at)
+    deps.ledger.mark_handoff_pending(
+        terminal_key,
+        run_id="prior",
+        observed_at=terminal.observed_at,
+    )
+    deps.ledger.mark_terminal(
+        terminal_key,
+        outcome="created",
+        page_id="page-prior",
+        observed_at=terminal.observed_at,
+    )
+    requests: list[dict] = []
+
+    def invoke(request: dict, write: bool) -> dict:
+        requests.append(request)
+        return core_result(request, write=write)
+
+    deps.invoke_handoff = invoke
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["counts"]["already_terminal"] == 1
+    assert [event["eventKey"] for event in requests[0]["events"]] == [
+        funding_event_key(unseen)
+    ]
+
+
+def test_dry_run_rejects_incomplete_core_result_without_ledger_changes(
+    tmp_path: Path,
+) -> None:
+    row = observation()
+
+    def invoke(request: dict, write: bool) -> dict:
+        result = core_result(request, write=write)
+        result["complete"] = False
+        return result
+
+    deps = dependencies(tmp_path, FakeBrowser([row]), invoke=invoke)
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=False,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "result_schema_mismatch"
+    assert deps.ledger.events == {}
+    assert not deps.ledger.path.exists()
+
+
+def test_bootstrap_rejects_mixed_terminal_result_before_any_terminalization(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(12)]
+
+    def invoke(request: dict, write: bool) -> dict:
+        result = core_result(request, write=write)
+        result["events"][1]["state"] = "retryable_failure"
+        return result
+
+    deps = dependencies(tmp_path, FakeBrowser(rows), invoke=invoke)
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=True,
+        now=NOW,
+    )
+
+    assert receipt["status"] == "result_schema_mismatch"
+    assert receipt["error"]["reason"] == "ValueError"
+    assert "terminal" in receipt["error"]["evidence"]
+    assert {
+        record["state"] for record in deps.ledger.events.values()
+    } == {"retryable"}
+    assert len(deps.ledger.events) == 10
+    assert not deps.ledger.bootstrap_complete(SOURCE)
+    assert funding_event_key(rows[10]) not in deps.ledger.events
+
+
+def test_dry_bootstrap_counts_only_nonterminal_handoffs(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(12)]
+    deps = dependencies(tmp_path, FakeBrowser(rows))
+    for row in rows[:4]:
+        key = funding_event_key(row)
+        deps.ledger.observe(key, observed_at=row.observed_at)
+        deps.ledger.mark_handoff_pending(
+            key,
+            run_id="prior-bootstrap",
+            observed_at=row.observed_at,
+        )
+        deps.ledger.mark_terminal(
+            key,
+            outcome="created",
+            page_id=f"page-{key[:8]}",
+            observed_at=row.observed_at,
+        )
+
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=False,
+        now=NOW,
+    )
+
+    assert receipt["counts"]["already_terminal"] == 4
+    assert receipt["counts"]["would_handoff"] == 6
+    assert receipt["counts"]["would_baseline"] == 2
+
+
+def test_detector_receipt_is_durable_before_live_core_invocation(
+    tmp_path: Path,
+) -> None:
+    row = observation()
+    deps: WatcherDependencies
+
+    def invoke(request: dict, write: bool) -> dict:
+        receipt_paths = list(
+            (deps.ledger.path.parent / "receipts").glob("*.json")
+        )
+        assert len(receipt_paths) == 1
+        detector_receipt = json.loads(
+            receipt_paths[0].read_text(encoding="utf-8")
+        )
+        assert detector_receipt["runId"] == request["runId"]
+        assert detector_receipt["status"] == "handoff_pending"
+        return core_result(request, write=write)
+
+    deps = dependencies(tmp_path, FakeBrowser([row]), invoke=invoke)
+    assert run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )["status"] == "complete"
+
+
+def test_latest_receipt_is_durable_before_notification(tmp_path: Path) -> None:
+    row = observation()
+    deps = dependencies(tmp_path, FakeBrowser([row]))
+
+    def notify(items: list[str]) -> None:
+        latest = json.loads(
+            (deps.ledger.path.parent / "latest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert latest["status"] == "complete"
+        assert latest["events"][0]["state"] == "created"
+        assert items == [f"{row.company} — {row.crunchbase_url}"]
+
+    deps.notify = notify
+    assert run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )["status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("complete", 0),
+        ("outside_schedule", 0),
+        ("already_checked_slot", 0),
+        ("already_bootstrapped", 0),
+        ("busy", 75),
+        ("budget_exhausted", 75),
+        ("crm_retryable", 75),
+        ("browser_retryable", 75),
+        ("captcha", 78),
+        ("security_challenge", 78),
+        ("auth_wall", 78),
+        ("source_drift", 78),
+        ("result_schema_mismatch", 78),
+    ],
+)
+def test_cli_exit_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    expected: int,
+) -> None:
+    monkeypatch.setattr(
+        funding_watcher,
+        "load_watcher_config",
+        lambda path: {},
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "_production_dependencies",
+        lambda loaded: object(),
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "run_check",
+        lambda *args, **kwargs: {"status": status},
+    )
+
+    assert funding_watcher.main(["check", "--dry-run"]) == expected
+
+
+def test_invalid_seed_top_is_cli_misuse_before_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    touched: list[str] = []
+    monkeypatch.setattr(
+        funding_watcher,
+        "load_watcher_config",
+        lambda path: touched.append("config") or {},
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "_production_dependencies",
+        lambda loaded: touched.append("dependencies") or object(),
+    )
+
+    assert funding_watcher.main(
+        ["bootstrap", "--dry-run", "--seed-top", "0"]
+    ) == 64
+    assert touched == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["check", "--write"],
+        ["check", "--dry-run", "--yes"],
+        ["bootstrap", "--write"],
+        ["unknown-command"],
+    ],
+)
+def test_cli_command_misuse_exits_64(argv: list[str]) -> None:
+    assert funding_watcher.main(argv) == 64
+
+
+def test_migration_schema_failure_exits_78_without_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    touched: list[str] = []
+    monkeypatch.setattr(
+        funding_watcher,
+        "load_watcher_config",
+        lambda path: {
+            "sourceDefinitions": [SimpleNamespace(url=SOURCE)],
+            "legacyStateDirectory": "/isolated/legacy",
+            "stateDirectory": "/isolated/research",
+        },
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "_production_dependencies",
+        lambda loaded: touched.append("dependencies"),
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "migrate_legacy_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("legacy schema mismatch")
+        ),
+    )
+
+    assert funding_watcher.main(["migrate-legacy-state"]) == 78
+    assert touched == []

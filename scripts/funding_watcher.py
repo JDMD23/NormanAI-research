@@ -35,6 +35,7 @@ from lib.crunchbase_saved_list import (  # noqa: E402
 from lib.funding_handoff import (  # noqa: E402
     build_handoff,
     invoke_crm_handoff,
+    validate_result,
     write_handoff,
 )
 from lib.funding_watcher_state import (  # noqa: E402
@@ -145,6 +146,15 @@ def run_check(
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
             receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
+            if snapshot.result_count != (
+                len(snapshot.observations) + len(snapshot.rejections)
+            ):
+                return _finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "incomplete_snapshot_coverage",
+                )
             for row in snapshot.observations:
                 key = funding_event_key(row)
                 if dependencies.ledger.is_terminal(key):
@@ -166,13 +176,19 @@ def run_check(
         if not write:
             try:
                 result = dependencies.invoke_handoff(request, False)
+                _require_validated_result(result, request, write=False)
             except Exception as exc:
                 receipt["error"] = {
                     "reason": type(exc).__name__,
                     "evidence": str(exc)[:500],
                 }
+                status = (
+                    "result_schema_mismatch"
+                    if isinstance(exc, ValueError)
+                    else "crm_retryable"
+                )
                 return _finish(
-                    state_root, receipt, "crm_retryable", "crm_preview_failed"
+                    state_root, receipt, status, "crm_preview_failed"
                 )
             receipt["events"] = list(result["events"])
             receipt["counts"]["would_handoff"] = len(pending)
@@ -187,8 +203,10 @@ def run_check(
             dependencies.ledger.mark_handoff_pending(
                 key, run_id=run_id, observed_at=now.isoformat()
             )
+        _publish_detector_receipt(state_root, receipt)
         try:
             result = dependencies.invoke_handoff(request, True)
+            _require_validated_result(result, request, write=True)
             _require_result_alignment(result, pending)
         except Exception as exc:
             for key, _ in pending:
@@ -204,7 +222,13 @@ def run_check(
                 if isinstance(exc, ValueError)
                 else "crm_retryable"
             )
-            return _finish(state_root, receipt, status, "crm_handoff_failed")
+            return _finish(
+                state_root,
+                receipt,
+                status,
+                "crm_handoff_failed",
+                publish_immutable=False,
+            )
 
         notifications: list[str] = []
         for event, (key, row) in zip(result["events"], pending):
@@ -216,7 +240,11 @@ def run_check(
                     observed_at=now.isoformat(),
                 )
                 return _finish(
-                    state_root, receipt, "crm_retryable", "nonterminal_core_result"
+                    state_root,
+                    receipt,
+                    "crm_retryable",
+                    "nonterminal_core_result",
+                    publish_immutable=False,
                 )
             dependencies.ledger.mark_terminal(
                 key,
@@ -229,9 +257,16 @@ def run_check(
         receipt["events"] = list(result["events"])
         if slot:
             dependencies.ledger.mark_slot_complete(slot, run_id=run_id)
+        finished = _finish(
+            state_root,
+            receipt,
+            "complete",
+            "",
+            publish_immutable=False,
+        )
         if notifications:
             dependencies.notify(notifications)
-        return _finish(state_root, receipt, "complete", "")
+        return finished
 
 
 def run_bootstrap(
@@ -242,6 +277,12 @@ def run_bootstrap(
     write: bool,
     now: datetime,
 ) -> dict[str, Any]:
+    if (
+        not isinstance(seed_top, int)
+        or isinstance(seed_top, bool)
+        or seed_top <= 0
+    ):
+        raise ValueError("seed_top must be a positive integer")
     run_id = _run_id(now)
     receipt = _base_receipt("bootstrap", run_id, now, write)
     state_root = dependencies.ledger.path.parent
@@ -304,12 +345,6 @@ def run_bootstrap(
                     state_root, receipt, "source_drift", "incomplete_bootstrap_coverage"
                 )
             observations.extend(snapshot.observations)
-        if (
-            not isinstance(seed_top, int)
-            or isinstance(seed_top, bool)
-            or seed_top <= 0
-        ):
-            raise ValueError("seed_top must be a positive integer")
         candidates, baseline = observations[:seed_top], observations[seed_top:]
         all_pairs = [(funding_event_key(row), row) for row in candidates]
         pairs = [
@@ -340,15 +375,27 @@ def run_bootstrap(
         if not write:
             try:
                 result = dependencies.invoke_handoff(request, False)
+                _require_validated_result(result, request, write=False)
             except Exception as exc:
                 receipt["error"] = {
                     "reason": type(exc).__name__,
                     "evidence": str(exc)[:500],
                 }
-                return _finish(state_root, receipt, "crm_retryable", "crm_preview_failed")
+                status = (
+                    "result_schema_mismatch"
+                    if isinstance(exc, ValueError)
+                    else "crm_retryable"
+                )
+                return _finish(
+                    state_root,
+                    receipt,
+                    status,
+                    "crm_preview_failed",
+                )
             receipt["events"] = list(result["events"])
-            receipt["counts"]["would_handoff"] = len(candidates)
+            receipt["counts"]["would_handoff"] = len(pairs)
             receipt["counts"]["would_baseline"] = len(baseline)
+            receipt["counts"]["already_terminal"] = already_terminal
             return _finish(state_root, receipt, "complete", "")
 
         for key, row in pairs:
@@ -358,20 +405,32 @@ def run_bootstrap(
             dependencies.ledger.mark_handoff_pending(
                 key, run_id=run_id, observed_at=now.isoformat()
             )
+        _publish_detector_receipt(state_root, receipt)
         try:
             result = dependencies.invoke_handoff(request, True)
+            _require_validated_result(result, request, write=True)
             _require_result_alignment(result, pairs)
         except Exception as exc:
             for key, _ in pairs:
                 dependencies.ledger.mark_retryable(
                     key, reason=str(exc)[:500], observed_at=now.isoformat()
                 )
+            receipt["error"] = {
+                "reason": type(exc).__name__,
+                "evidence": str(exc)[:500],
+            }
             status = (
                 "result_schema_mismatch"
                 if isinstance(exc, ValueError)
                 else "crm_retryable"
             )
-            return _finish(state_root, receipt, status, "crm_handoff_failed")
+            return _finish(
+                state_root,
+                receipt,
+                status,
+                "crm_handoff_failed",
+                publish_immutable=False,
+            )
 
         notifications = []
         counts = {
@@ -389,7 +448,11 @@ def run_bootstrap(
                     observed_at=now.isoformat(),
                 )
                 return _finish(
-                    state_root, receipt, "crm_retryable", "nonterminal_core_result"
+                    state_root,
+                    receipt,
+                    "crm_retryable",
+                    "nonterminal_core_result",
+                    publish_immutable=False,
                 )
             dependencies.ledger.mark_terminal(
                 key,
@@ -405,8 +468,15 @@ def run_bootstrap(
         )
         receipt["events"] = list(result["events"])
         receipt["counts"] = counts
+        finished = _finish(
+            state_root,
+            receipt,
+            "complete",
+            "",
+            publish_immutable=False,
+        )
         dependencies.notify(notifications)
-        return _finish(state_root, receipt, "complete", "")
+        return finished
 
 
 def _base_receipt(
@@ -438,12 +508,30 @@ def _finish(
     receipt: dict[str, Any],
     status: str,
     reason: str,
+    *,
+    publish_immutable: bool = True,
 ) -> dict[str, Any]:
     receipt["status"] = status
     receipt["stopReason"] = reason
-    write_immutable_receipt(state_root, receipt)
+    if publish_immutable:
+        write_immutable_receipt(state_root, receipt)
     _atomic_write_json(state_root / "latest.json", receipt)
     return receipt
+
+
+def _publish_detector_receipt(
+    state_root: Path,
+    receipt: dict[str, Any],
+) -> None:
+    detector_receipt = {
+        **receipt,
+        "status": "handoff_pending",
+        "stopReason": "",
+        "sources": list(receipt["sources"]),
+        "events": [],
+        "counts": dict(receipt["counts"]),
+    }
+    write_immutable_receipt(state_root, detector_receipt)
 
 
 def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
@@ -480,6 +568,18 @@ def _require_result_alignment(
     ]
     if actual != expected:
         raise ValueError("CRM result event key order does not match request")
+
+
+def _require_validated_result(
+    result: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    write: bool,
+) -> None:
+    validate_result(result, request=request)
+    expected_mode = "write" if write else "dry_run"
+    if result["mode"] != expected_mode:
+        raise ValueError("CRM result mode does not match invocation")
 
 
 def _baseline_and_complete(
@@ -590,6 +690,18 @@ def _exit_code(receipt: dict[str, Any]) -> int:
     return 0
 
 
+def _positive_cli_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -607,7 +719,11 @@ def main(argv: list[str] | None = None) -> int:
         if name == "check":
             command.add_argument("--enforce-schedule", action="store_true")
         else:
-            command.add_argument("--seed-top", type=int, default=10)
+            command.add_argument(
+                "--seed-top",
+                type=_positive_cli_integer,
+                default=10,
+            )
     commands.add_parser("migrate-legacy-state")
     try:
         args = parser.parse_args(argv)
