@@ -154,3 +154,66 @@ def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
     second = datetime(2026, 7, 30, 0, 1, tzinfo=NEW_YORK)
     assert budget.claim(first, requested=2, lane="research-funding-watcher") == 2
     assert budget.snapshot(second)["used"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm-core": 24},
+        },
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 26,
+            "used": 25,
+            "lanes": {"crm-core": 25},
+        },
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "not-a-date",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm-core": 25},
+        },
+    ],
+)
+def test_corrupt_prior_day_budget_fails_closed_without_rewrite(
+    tmp_path: Path,
+    payload: dict,
+) -> None:
+    """A date change must not reopen allowance before validating old state."""
+    path = tmp_path / "budget.json"
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    with pytest.raises(RuntimeError, match="shared Crunchbase budget"):
+        budget.claim(today, requested=1, lane="research-funding-watcher")
+
+    assert path.read_text(encoding="utf-8") == serialized
+
+
+def test_future_dated_budget_fails_closed_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "budget.json"
+    payload = {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-30",
+        "ceiling": 25,
+        "used": 25,
+        "lanes": {"crm-core": 25},
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    with pytest.raises(RuntimeError, match="future-dated"):
+        budget.snapshot(today)
+
+    assert path.read_text(encoding="utf-8") == serialized

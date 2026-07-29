@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
@@ -142,18 +142,20 @@ class DailyCrunchbaseBudget:
             os.close(fd)
 
     def _payload_for(self, now: datetime) -> dict[str, Any]:
-        date = now.astimezone(NEW_YORK).date().isoformat()
+        local_date = now.astimezone(NEW_YORK).date()
         if not self.path.exists():
-            return _new_payload(date)
+            return _new_payload(local_date.isoformat())
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError("invalid shared Crunchbase budget") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("invalid shared Crunchbase budget")
-        if payload.get("date") != date:
-            return _new_payload(date)
-        _validate_budget(payload)
+        persisted_date = _validate_budget(payload)
+        if persisted_date < local_date:
+            return _new_payload(local_date.isoformat())
+        if persisted_date > local_date:
+            raise RuntimeError("future-dated shared Crunchbase budget")
         return payload
 
 
@@ -167,7 +169,7 @@ def _new_payload(date: str) -> dict[str, Any]:
     }
 
 
-def _validate_budget(payload: dict[str, Any]) -> None:
+def _validate_budget(payload: dict[str, Any]) -> date:
     if set(payload) != {"schemaVersion", "date", "ceiling", "used", "lanes"}:
         raise RuntimeError("invalid shared Crunchbase budget shape")
     if (
@@ -175,6 +177,15 @@ def _validate_budget(payload: dict[str, Any]) -> None:
         or payload["ceiling"] != APPROVED_CEILING
     ):
         raise RuntimeError("unsupported shared Crunchbase budget")
+    persisted_date = payload["date"]
+    if not isinstance(persisted_date, str):
+        raise RuntimeError("invalid shared Crunchbase budget values")
+    try:
+        parsed_date = date.fromisoformat(persisted_date)
+    except ValueError as exc:
+        raise RuntimeError("invalid shared Crunchbase budget values") from exc
+    if parsed_date.isoformat() != persisted_date:
+        raise RuntimeError("invalid shared Crunchbase budget values")
     used, lanes = payload["used"], payload["lanes"]
     if (
         not isinstance(used, int)
@@ -192,6 +203,7 @@ def _validate_budget(payload: dict[str, Any]) -> None:
         or sum(lanes.values()) != used
     ):
         raise RuntimeError("invalid shared Crunchbase budget values")
+    return parsed_date
 
 
 def _require_aware(now: datetime) -> None:
