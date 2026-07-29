@@ -356,6 +356,11 @@ def migrate_legacy_state(
         existing_receipt = _load_json(receipt_path)
         _validate_research_ledger(existing_ledger)
         migrated_bootstrap = new_payload["bootstraps"][source]
+        migration_event_keys = {
+            key
+            for key, record in existing_ledger["events"].items()
+            if "migration" in record
+        }
         original_events_match = all(
             existing_ledger["events"].get(key) == record
             for key, record in migrated_events.items()
@@ -363,6 +368,7 @@ def migrate_legacy_state(
         if (
             existing_receipt != receipt
             or not original_events_match
+            or migration_event_keys != set(migrated_events)
             or existing_ledger["bootstraps"].get(source)
             != migrated_bootstrap
         ):
@@ -426,6 +432,14 @@ def _valid_aware_datetime(value: Any) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
+def _valid_nonempty_raw_string(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+    )
+
+
 def _valid_event_record(record: Any) -> bool:
     if not isinstance(record, dict):
         return False
@@ -446,18 +460,19 @@ def _valid_event_record(record: Any) -> bool:
         return False
     if state == "handoff_pending":
         if (
-            not isinstance(record.get("runId"), str)
-            or not record["runId"]
+            not _valid_nonempty_raw_string(record.get("runId"))
             or set(record) not in (pending, pending | {"reason"})
         ):
             return False
-        return "reason" not in record or isinstance(record["reason"], str)
+        return (
+            "reason" not in record
+            or _valid_nonempty_raw_string(record["reason"])
+        )
     if state == "retryable":
         return (
             set(record) == pending | {"reason"}
-            and isinstance(record.get("runId"), str)
-            and bool(record["runId"])
-            and isinstance(record.get("reason"), str)
+            and _valid_nonempty_raw_string(record.get("runId"))
+            and _valid_nonempty_raw_string(record.get("reason"))
         )
 
     terminal_required = common | {"updatedAt", "outcome", "pageId"}
@@ -475,11 +490,11 @@ def _valid_event_record(record: Any) -> bool:
         or outcome not in TERMINAL_OUTCOMES
         or (
             page_id is not None
-            and (not isinstance(page_id, str) or not page_id)
+            and not _valid_nonempty_raw_string(page_id)
         )
         or (
             "reason" in record
-            and not isinstance(record["reason"], str)
+            and not _valid_nonempty_raw_string(record["reason"])
         )
     ):
         return False
@@ -498,13 +513,10 @@ def _valid_event_record(record: Any) -> bool:
     elif outcome == "baseline":
         if "runId" in record or "reason" in record:
             return False
-    elif (
-        not isinstance(record.get("runId"), str)
-        or not record["runId"]
-    ):
+    elif not _valid_nonempty_raw_string(record.get("runId")):
         return False
     if outcome in {"created", "queued_existing"}:
-        return migration is not None or isinstance(page_id, str)
+        return "migration" in record or _valid_nonempty_raw_string(page_id)
     return page_id is None
 
 
@@ -537,8 +549,7 @@ def _valid_completed_slot(slot: Any, record: Any) -> bool:
         slot == expected
         and isinstance(record, dict)
         and set(record) == {"runId"}
-        and isinstance(record.get("runId"), str)
-        and bool(record["runId"])
+        and _valid_nonempty_raw_string(record.get("runId"))
     )
 
 
