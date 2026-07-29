@@ -14,9 +14,7 @@ caller skips the lane rather than failing the run.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 import re
 import subprocess
 import time
@@ -25,10 +23,12 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlsplit
 
-from lib.config import ROOT
+from lib.browser_coordination import (
+    BrowserLeaseUnavailable,
+    SharedBrowserLease,
+)
 
 MAX_CHARS = 400_000
-LEASE_PATH = ROOT / "state" / "browser_leases" / "research-browse.lock"
 
 
 class ChromeUnavailable(RuntimeError):
@@ -46,25 +46,13 @@ class PageNotReady(RuntimeError):
 @contextmanager
 def lease() -> Iterator[None]:
     """Hold Chrome exclusively so we never fight crm-core's lanes for it."""
-    LEASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_RDWR
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(LEASE_PATH, flags, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(fd)
+        with SharedBrowserLease():
+            yield
+    except BrowserLeaseUnavailable as exc:
         raise ChromeUnavailable(
             "another browser job holds the Chrome lease — try again after it finishes"
         ) from exc
-    os.ftruncate(fd, 0)
-    os.write(fd, f"{os.getpid()}\n".encode("ascii"))
-    try:
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def _osascript(script: str, timeout: int = 30) -> str:
