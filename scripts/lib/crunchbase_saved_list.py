@@ -230,21 +230,39 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _filter_contract_matches(text: str, source: SavedListDefinition, *, input_values: Any = None) -> bool:
-    words = _spaces(text).casefold()
-    date_ok = bool(re.search(r"(?:last )?funding date.{0,40}\bafter\b", words)) and not bool(re.search(r"(?:last )?funding date.{0,40}(?:\bnot\s+after\b|\bbefore\b)", words))
-    amount_ok = bool(re.search(r"(?:last )?funding amount.{0,60}(?:\bgreater than or equal to\b|\bat least\b|>=)", words)) and not bool(re.search(r"(?:last )?funding amount.{0,60}(?:\bnot\s+greater than or equal to\b|\bless than\b|<)", words))
-    if not date_ok or not amount_ok:
+def _filter_contract_matches(filters: Any, source: SavedListDefinition) -> bool:
+    """Match configured values only against their own visible filter control."""
+    if not isinstance(filters, list):
         return False
-    values = " ".join(str(item or "") for item in input_values) if isinstance(input_values, list) else ""
-    normalized = _spaces(f"{text} {values}").casefold()
-    expected = datetime.strptime(source.expected_funding_after, "%Y-%m-%d")
-    dates = {source.expected_funding_after.casefold(), f"{expected.strftime('%b')} {expected.day}, {expected.year}".casefold(), f"{expected.strftime('%B')} {expected.day}, {expected.year}".casefold(), expected.strftime("%m/%d/%Y").casefold(), f"{expected.month}/{expected.day}/{expected.year}".casefold()}
-    minimum = source.expected_minimum_amount
-    amounts = {f"${minimum:,}".casefold(), f"${minimum}".casefold(), f"{minimum:,}".casefold(), f"{minimum}".casefold()}
-    if minimum % 1_000_000 == 0:
-        amounts.add(f"${minimum // 1_000_000}m")
-    return any(value in normalized for value in dates) and any(value in normalized for value in amounts)
+    date_labels = {"funding date", "last funding date"}
+    amount_labels = {"funding amount", "last funding amount"}
+    date_controls: list[dict[str, Any]] = []
+    amount_controls: list[dict[str, Any]] = []
+    for control in filters:
+        if not isinstance(control, dict):
+            return False
+        label = _spaces(control.get("label")).casefold()
+        if label in date_labels:
+            date_controls.append(control)
+        elif label in amount_labels:
+            amount_controls.append(control)
+    if len(date_controls) != 1 or len(amount_controls) != 1:
+        return False
+    date = date_controls[0]
+    if _spaces(date.get("operator")).casefold() != "after":
+        return False
+    try:
+        date_matched = _parse_date(_spaces(date.get("value"))) == source.expected_funding_after
+    except ValueError:
+        return False
+    amount = amount_controls[0]
+    if _spaces(amount.get("operator")).casefold() not in {"greater than or equal to", "at least", ">="}:
+        return False
+    try:
+        amount_minor, currency = _parse_amount(_spaces(amount.get("value")))
+    except ValueError:
+        return False
+    return date_matched and currency == "USD" and amount_minor == source.expected_minimum_amount * 100
 
 
 def _source_title(value: Any) -> str:
@@ -263,13 +281,27 @@ def _is_source_page_url(actual_url: Any, source_url: str) -> bool:
     return (actual_parts.scheme == source_parts.scheme and actual_parts.netloc == source_parts.netloc and actual_parts.path == source_parts.path and not actual_parts.params and not actual_parts.fragment and set(query) == {"pageId"} and len(query["pageId"]) == 1 and bool(PAGE_ID.fullmatch(query["pageId"][0])))
 
 
+def _is_expected_source_page_url(actual_url: Any, source_url: str, page_number: int) -> bool:
+    """Verify page zero is the base URL and later pages progress sequentially."""
+    actual = str(actual_url or "")
+    if page_number == 0:
+        return actual == source_url
+    try:
+        actual_parts, source_parts = urlparse(actual), urlparse(source_url)
+        query = parse_qs(actual_parts.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    page_id = query.get("pageId", [])
+    return (actual_parts.scheme == source_parts.scheme and actual_parts.netloc == source_parts.netloc and actual_parts.path == source_parts.path and not actual_parts.params and not actual_parts.fragment and set(query) == {"pageId"} and len(page_id) == 1 and bool(PAGE_ID.fullmatch(page_id[0])) and page_id[0].split("_", 1)[0] == str(page_number + 1))
+
+
 def _drift_reasons(payload: dict[str, Any], source: SavedListDefinition) -> list[str]:
     reasons = []
     if not _is_source_page_url(payload.get("pageUrl"), source.url): reasons.append("source_url")
     if _source_title(payload.get("title")) != source.name: reasons.append("title")
     if _spaces(payload.get("resultType")) != source.expected_result_type: reasons.append("result_type")
     if source.expected_sort.casefold() == "new at top" and not payload.get("newAtTop"): reasons.append("sort")
-    if not _filter_contract_matches(str(payload.get("filterText") or ""), source, input_values=payload.get("filterInputValues")): reasons.append("filters")
+    if not _filter_contract_matches(payload.get("filters"), source): reasons.append("filters")
     return reasons
 
 
@@ -333,7 +365,9 @@ const text=e=>((e&&(e.innerText||e.textContent))||"").trim(); const bodyText=doc
 const cells=row=>Array.from(row.querySelectorAll("grid-cell,[role='gridcell'],mat-cell")).map(cell=>({text:text(cell),key:[cell.getAttribute("data-column-id")||"",cell.getAttribute("data-field")||"",cell.getAttribute("aria-label")||"",...Array.from(cell.querySelectorAll("a")).map(a=>a.href||"")].join(" ").toLowerCase(),links:Array.from(cell.querySelectorAll("a")).map(a=>({text:text(a),href:a.href||""}))}));
 const rowElements=Array.from(document.querySelectorAll(".results-container grid-row,[role='row'],mat-row"));
 const rows=rowElements.map(row=>{const all=cells(row), org=row.querySelector("a[href*='/organization/']"); if(!org)return null; const find=p=>all.find(c=>p.test(c.key)); const date=find(/last_funding_at|last funding date/)||all.find(c=>/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}$/.test(c.text)); const type=find(/last_funding_type|last funding type/); const money=all.filter(c=>/^[\$£€][\d,.]+(?:[KMB])?$/i.test(c.text)); const amount=find(/last_funding_total|last funding amount/)||money.find(c=>all.indexOf(c)>all.indexOf(date)); const total=all.find(c=>/funding_total|total funding/.test(c.key)&&!/last_funding_total|last funding amount/.test(c.key))||money.find(c=>c!==amount); const links=all.flatMap(c=>c.links); return {company:text(org),crunchbaseUrl:org.href,website:links.find(a=>/^https?:\/\//.test(a.href)&&!a.href.includes("crunchbase.com")&&!a.href.includes("linkedin.com"))?.href||"",linkedin:links.find(a=>a.href.includes("linkedin.com"))?.href||"",headquarters:find(/location_identifiers|headquarters/)?.text||all[4]?.text||"",founded:find(/founded_on|founded/)?.text||all[9]?.text||"",description:find(/short_description|description/)?.text||all[5]?.text||"",industries:links.filter(a=>a.href.includes("/categories/")).map(a=>a.text),founders:links.filter(a=>a.href.includes("/person/")).map(a=>a.text),investors:(find(/investor_identifiers|top investors/)?.links||all[18]?.links||[]).filter(a=>a.href.includes("/organization/")).map(a=>a.text),fundingDate:date?.text||"",fundingType:type?.text||"",fundingAmount:amount?.text||"",totalFunding:total?.text||"",numberOfFundingRounds:Number(find(/num_funding_rounds|number of funding rounds/)?.text||all[14]?.text||"")||null}; }).filter(Boolean);
-const next=document.querySelector(".page-button-next"); return JSON.stringify({pageUrl:location.href,pageTitle:document.title,readyState:document.readyState,gridRowCount:rowElements.length,pageText:bodyText.slice(0,12000),captchaDetected:Boolean(document.querySelector('#px-captcha,iframe[src*="captcha" i],iframe[src*="recaptcha" i],iframe[src*="hcaptcha" i],[class*="captcha" i],[id*="captcha" i],[data-sitekey]')),securityChallengeDetected:Boolean(document.querySelector('#challenge-form,#cf-challenge-running,[id^="cf-chl-"],[class*="cf-chl-"],script[src*="/cdn-cgi/challenge-platform/"],script[src*="perimeterx"]')),title:text(document.querySelector("[data-test='saved-search-name'],[data-testid='saved-search-name'],h1")),resultType:bodyText.match(/\b(Companies)\b/)?.[1]||"",newAtTop:bodyText.includes("NEW AT TOP"),filterText:bodyText,filterInputValues:Array.from(document.querySelectorAll("input")).map(i=>i.value||"").filter(Boolean),resultCount:Number(bodyText.match(/(?:of\s+)?([\d,]+)\s+results/i)?.[1]?.replace(/,/g,"")||0),hasNext:Boolean(next&&!next.className.includes("disabled")&&!next.className.includes("no-events")),rows}); })()'''
+const filterContainers=Array.from(document.querySelectorAll("[data-test*='filter' i],[data-testid*='filter' i],.filter-item,.filter-group"));
+const filters=filterContainers.map(container=>{const label=text(container.querySelector("label,[data-test*='label' i],[data-testid*='label' i],.filter-label")); const controls=Array.from(container.querySelectorAll("input,button,[role='combobox']")); const input=controls.find(control=>control.tagName==="INPUT"); const operator=controls.map(control=>text(control)||control.getAttribute("aria-label")||"").find(value=>/after|before|greater than|at least|>=|</i.test(value))||""; return {label,operator,value:input?.value||""};}).filter(filter=>filter.label);
+const next=document.querySelector(".page-button-next"); return JSON.stringify({pageUrl:location.href,pageTitle:document.title,readyState:document.readyState,gridRowCount:rowElements.length,pageText:bodyText.slice(0,12000),captchaDetected:Boolean(document.querySelector('#px-captcha,iframe[src*="captcha" i],iframe[src*="recaptcha" i],iframe[src*="hcaptcha" i],[class*="captcha" i],[id*="captcha" i],[data-sitekey]')),securityChallengeDetected:Boolean(document.querySelector('#challenge-form,#cf-challenge-running,[id^="cf-chl-"],[class*="cf-chl-"],script[src*="/cdn-cgi/challenge-platform/"],script[src*="perimeterx"]')),title:text(document.querySelector("[data-test='saved-search-name'],[data-testid='saved-search-name'],h1")),resultType:bodyText.match(/\b(Companies)\b/)?.[1]||"",newAtTop:bodyText.includes("NEW AT TOP"),filters,resultCount:Number(bodyText.match(/(?:of\s+)?([\d,]+)\s+results/i)?.[1]?.replace(/,/g,"")||0),hasNext:Boolean(next&&!next.className.includes("disabled")&&!next.className.includes("no-events")),rows}); })()'''
 
 
 def _tab_ref(value: str) -> tuple[int, int]:
@@ -344,14 +378,16 @@ def _tab_ref(value: str) -> tuple[int, int]:
 
 class ChromeSavedListTransport:
     def __init__(self, *, timeout_seconds: int = 60, sleeper: Callable[[float], None] = time.sleep):
-        self.timeout_seconds, self.sleeper, self._previous_tab = timeout_seconds, sleeper, None
+        self.timeout_seconds, self.sleeper = timeout_seconds, sleeper
+        self._previous_tab: tuple[int, int] | None = None
+        self._owned_tab: tuple[int, int, str] | None = None
     def _osascript(self, script: str) -> str: return chrome.run_osascript(script, timeout=self.timeout_seconds)
     def open_dedicated_tab(self, url: str) -> str:
         source_url = validate_saved_list_url(url); chrome.ensure_chrome_running(); literal = chrome.applescript_string_literal(source_url)
-        script = 'tell application "Google Chrome"\n' + f' set sourceUrl to {literal}\n set previousWindowId to id of front window\n set previousTabIndex to active tab index of front window\n set targetWindowId to 0\n set targetTabIndex to 0\n set candidateUrl to ""\n repeat with candidateWindow in windows\n  repeat with candidateIndex from 1 to count of tabs of candidateWindow\n   set candidateUrl to URL of tab candidateIndex of candidateWindow\n   if candidateUrl is sourceUrl or candidateUrl starts with (sourceUrl & "?pageId=") then\n    set targetWindowId to id of candidateWindow\n    set targetTabIndex to candidateIndex\n    exit repeat\n   end if\n  end repeat\n  if targetWindowId is not 0 then exit repeat\n end repeat\n if targetWindowId is 0 then\n  set targetWindowId to id of front window\n  make new tab at end of tabs of front window\n  set targetTabIndex to count of tabs of front window\n  set candidateUrl to ""\n end if\n if candidateUrl is not sourceUrl then\n  set URL of tab targetTabIndex of window id targetWindowId to sourceUrl\n end if\n set active tab index of window id targetWindowId to targetTabIndex\n set index of window id targetWindowId to 1\n return (previousWindowId as text) & "|" & (previousTabIndex as text) & "|" & (targetWindowId as text) & "|" & (targetTabIndex as text)\nend tell'
+        script = 'tell application "Google Chrome"\n' + f' set sourceUrl to {literal}\n set previousWindowId to id of front window\n set previousTabIndex to active tab index of front window\n set targetWindowId to id of front window\n make new tab at end of tabs of front window\n set targetTabIndex to count of tabs of front window\n set URL of tab targetTabIndex of window id targetWindowId to sourceUrl\n set active tab index of window id targetWindowId to targetTabIndex\n set index of window id targetWindowId to 1\n return (previousWindowId as text) & "|" & (previousTabIndex as text) & "|" & (targetWindowId as text) & "|" & (targetTabIndex as text)\nend tell'
         parts = self._osascript(script).split("|")
         if len(parts) != 4 or any(not part.isdigit() for part in parts): raise RuntimeError("Chrome returned an invalid saved-list tab reference")
-        previous_window, previous_tab, target_window, target_tab = map(int, parts); self._previous_tab = (previous_window, previous_tab)
+        previous_window, previous_tab, target_window, target_tab = map(int, parts); self._previous_tab = (previous_window, previous_tab); self._owned_tab = (target_window, target_tab, source_url)
         return f"window-{target_window}:tab-{target_tab}"
     def evaluate(self, tab_ref: str, javascript: str) -> str:
         window_id, tab_index = _tab_ref(tab_ref); literal = chrome.applescript_string_literal(javascript)
@@ -374,6 +410,14 @@ class ChromeSavedListTransport:
         raise RuntimeError("Crunchbase pagination did not finish loading")
     def reset_to_source(self, tab_ref: str, url: str) -> None:
         source_url = validate_saved_list_url(url); self.evaluate(tab_ref, f"if (window.location.href !== {json.dumps(source_url)}) {{ window.location.href = {json.dumps(source_url)}; }} 'ok';")
+    def close_dedicated_tab(self, tab_ref: str) -> None:
+        window_id, tab_index = _tab_ref(tab_ref)
+        if self._owned_tab is None or self._owned_tab[:2] != (window_id, tab_index):
+            raise RuntimeError("refusing to close a Chrome tab not owned by the saved-list reader")
+        try:
+            self._osascript(f'tell application "Google Chrome"\n if exists window id {window_id} then\n  if (count of tabs of window id {window_id}) >= {tab_index} then\n   close tab {tab_index} of window id {window_id}\n  end if\n end if\nend tell\nreturn "ok"')
+        finally:
+            self._owned_tab = None
     def restore_previous_tab(self) -> None:
         if self._previous_tab is None: return
         window_id, tab_index = self._previous_tab
@@ -408,7 +452,10 @@ class CrunchbaseSavedListBrowser:
                     blocked = _browser_block(payload)
                     if blocked: raise CrunchbaseSavedListBlocked(*blocked)
                     rows, current_count, grid_count = payload.get("rows"), payload.get("resultCount"), payload.get("gridRowCount")
-                    ready = _is_source_page_url(payload.get("pageUrl"), source.url) and payload.get("readyState") in (None, "interactive", "complete") and isinstance(rows, list) and (grid_count is None or isinstance(grid_count, int) and grid_count >= 0) and isinstance(current_count, int) and not isinstance(current_count, bool) and current_count >= 0
+                    page_url = payload.get("pageUrl")
+                    if _is_source_page_url(page_url, source.url) and not _is_expected_source_page_url(page_url, source.url, page_number):
+                        raise CrunchbaseSavedListDrift("saved-list page position drift")
+                    ready = _is_expected_source_page_url(page_url, source.url, page_number) and payload.get("readyState") in (None, "interactive", "complete") and isinstance(rows, list) and (grid_count is None or isinstance(grid_count, int) and grid_count >= 0) and isinstance(current_count, int) and not isinstance(current_count, bool) and current_count >= 0
                     if ready and result_count is None: result_count = current_count
                     elif ready and current_count != result_count: raise CrunchbaseSavedListDrift("saved-list result count changed during pagination")
                     expected = min(SAVED_LIST_PAGE_SIZE, max(int(result_count or 0) - page_number * SAVED_LIST_PAGE_SIZE, 0)); has_more = int(result_count or 0) > (page_number + 1) * SAVED_LIST_PAGE_SIZE
@@ -425,8 +472,12 @@ class CrunchbaseSavedListBrowser:
             if tab_ref is not None:
                 cleanup: Exception | None = None
                 try:
-                    reset = getattr(self.transport, "reset_to_source", None)
-                    if callable(reset): reset(tab_ref, source.url)
+                    close = getattr(self.transport, "close_dedicated_tab", None)
+                    if callable(close):
+                        close(tab_ref)
+                    else:
+                        reset = getattr(self.transport, "reset_to_source", None)
+                        if callable(reset): reset(tab_ref, source.url)
                 except Exception as exc: cleanup = exc
                 try: self.transport.restore_previous_tab()
                 except Exception as exc:

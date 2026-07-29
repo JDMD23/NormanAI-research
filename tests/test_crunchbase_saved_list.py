@@ -87,23 +87,65 @@ def test_invalid_rows_are_rejected_without_dropping_other_valid_rows(payload: di
     assert result.rejections == ({"company": "Weave", "reason": reason},)
 
 
-@pytest.mark.parametrize("filter_text", [
-    "Last Funding Date is before Jul 1, 2026 Last Funding Amount is less than $5M",
-    "Last Funding Date is not after Jul 1, 2026 Last Funding Amount is not >= $5M",
+@pytest.mark.parametrize("filters", [
+    [
+        {"label": "Last Funding Date", "operator": "before", "value": "Jul 1, 2026"},
+        {"label": "Last Funding Amount", "operator": "less than", "value": "$5M"},
+    ],
+    [
+        {"label": "Last Funding Date", "operator": "not after", "value": "Jul 1, 2026"},
+        {"label": "Last Funding Amount", "operator": "not >=", "value": "$5M"},
+    ],
 ])
-def test_reversed_filter_operators_fail_closed(payload: dict, filter_text: str) -> None:
+def test_reversed_filter_operators_fail_closed(payload: dict, filters: list[dict]) -> None:
     with pytest.raises(RuntimeError, match="filters"):
-        parse_saved_list_snapshot({**payload, "filterText": filter_text}, SOURCE, OBSERVED_AT)
+        parse_saved_list_snapshot({**payload, "filters": filters}, SOURCE, OBSERVED_AT)
 
 
-def test_title_suffix_and_input_backed_filters_are_valid(payload: dict) -> None:
+def test_title_suffix_and_labeled_filters_are_valid(payload: dict) -> None:
     result = parse_saved_list_snapshot({**payload, "title": "Main Funding - July 2026 (12 new)", "filterText": "Last Funding Date after Last Funding Amount greater than or equal to", "filterInputValues": ["07/01/2026", "5,000,000"]}, SOURCE, OBSERVED_AT)
     assert result.title == SOURCE.name
 
 
+def test_unrelated_body_or_input_text_cannot_mask_changed_filter_controls(payload: dict) -> None:
+    changed_controls = {
+        "filters": [
+            {"label": "Last Funding Date", "operator": "after", "value": "Jul 2, 2026"},
+            {"label": "Last Funding Amount", "operator": "greater than or equal to", "value": "$6M"},
+        ]
+    }
+    with pytest.raises(RuntimeError, match="filters"):
+        parse_saved_list_snapshot(
+            {**payload, **changed_controls, "filterText": payload["filterText"], "filterInputValues": ["07/01/2026", "5,000,000"]},
+            SOURCE,
+            OBSERVED_AT,
+        )
+
+
+def test_filter_values_require_the_matching_visible_filter_label(payload: dict) -> None:
+    controls = {
+        "filters": [
+            {"label": "Founded Date", "operator": "after", "value": "Jul 1, 2026"},
+            {"label": "Total Funding", "operator": "greater than or equal to", "value": "$5M"},
+        ]
+    }
+    with pytest.raises(RuntimeError, match="filters"):
+        parse_saved_list_snapshot({**payload, **controls}, SOURCE, OBSERVED_AT)
+
+
+def test_duplicate_filter_controls_fail_closed_even_if_one_value_matches(payload: dict) -> None:
+    controls = [
+        {"label": "Funding Date", "operator": "after", "value": "Jul 2, 2026"},
+        {"label": "Funding Date", "operator": "after", "value": "Jul 1, 2026"},
+        {"label": "Last Funding Amount", "operator": "greater than or equal to", "value": "$5M"},
+    ]
+    with pytest.raises(RuntimeError, match="filters"):
+        parse_saved_list_snapshot({**payload, "filters": controls}, SOURCE, OBSERVED_AT)
+
+
 class FakeTransport:
     def __init__(self, states: list[dict]) -> None:
-        self.states, self.opened, self.reset_urls, self.restored = list(states), [], [], False
+        self.states, self.opened, self.reset_urls, self.closed, self.restored = list(states), [], [], [], False
     def open_dedicated_tab(self, url: str) -> str:
         self.opened.append(url); return "window-1:tab-2"
     def evaluate(self, tab_ref: str, javascript: str) -> str:
@@ -112,6 +154,8 @@ class FakeTransport:
         return bool(self.states)
     def reset_to_source(self, tab_ref: str, url: str) -> None:
         self.reset_urls.append(url)
+    def close_dedicated_tab(self, tab_ref: str) -> None:
+        self.closed.append(tab_ref)
     def restore_previous_tab(self) -> None:
         self.restored = True
 
@@ -131,14 +175,36 @@ def test_browser_requires_complete_pages_and_stable_pagination(payload: dict) ->
     assert transport.restored is True
 
 
-def test_browser_returns_complete_snapshot_resets_source_and_restores_tab(payload: dict) -> None:
+def test_browser_returns_complete_snapshot_closes_temporary_tab_and_restores_tab(payload: dict) -> None:
     complete = {**payload, "resultCount": len(payload["rows"]), "gridRowCount": len(payload["rows"]), "hasNext": False}
     transport = FakeTransport([complete])
     result = CrunchbaseSavedListBrowser(transport=transport).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
     assert [row.company for row in result.observations] == ["Weave", "Plend"]
     assert transport.opened == [SOURCE.url]
-    assert transport.reset_urls == [SOURCE.url]
+    assert transport.closed == ["window-1:tab-2"]
     assert transport.restored is True
+
+
+def test_browser_rejects_page_id_on_the_initial_source_page(payload: dict) -> None:
+    stale = {
+        **payload,
+        "pageUrl": SOURCE.url + "?pageId=2_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd",
+        "resultCount": len(payload["rows"]),
+        "gridRowCount": len(payload["rows"]),
+        "hasNext": False,
+    }
+    with pytest.raises(CrunchbaseSavedListDrift, match="page position"):
+        CrunchbaseSavedListBrowser(transport=FakeTransport([stale])).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
+
+
+def test_browser_rejects_skipped_or_stale_page_id_during_pagination(payload: dict) -> None:
+    def row(index: int) -> dict:
+        return {**payload["rows"][0], "company": f"Company {index}", "crunchbaseUrl": f"https://www.crunchbase.com/organization/company-{index}"}
+
+    first = {**payload, "resultCount": 51, "rows": [row(index) for index in range(50)], "gridRowCount": 50, "hasNext": True}
+    skipped = {**payload, "pageUrl": SOURCE.url + "?pageId=3_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd", "resultCount": 51, "rows": [row(50)], "gridRowCount": 1, "hasNext": False}
+    with pytest.raises(CrunchbaseSavedListDrift, match="page position"):
+        CrunchbaseSavedListBrowser(transport=FakeTransport([first, skipped])).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
 
 
 def test_browser_refuses_non_saved_list_navigation() -> None:
@@ -154,3 +220,20 @@ def test_chrome_transport_uses_safe_chrome_helpers(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
     monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: "10|1|10|3")
     assert ChromeSavedListTransport().open_dedicated_tab(SOURCE.url) == "window-10:tab-3"
+
+
+def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lib import chrome
+
+    calls: list[str] = []
+    monkeypatch.setattr(chrome, "ensure_chrome_running", lambda: None)
+    monkeypatch.setattr(chrome, "run_osascript", lambda script, timeout=60: calls.append(script) or "10|1|10|3")
+    transport = ChromeSavedListTransport()
+    tab_ref = transport.open_dedicated_tab(SOURCE.url)
+    transport.close_dedicated_tab(tab_ref)
+    transport.restore_previous_tab()
+
+    assert "make new tab at end of tabs of front window" in calls[0]
+    assert "repeat with candidateWindow" not in calls[0]
+    assert "close tab 3 of window id 10" in calls[1]
+    assert "set active tab index of window id 10 to 1" in calls[2]

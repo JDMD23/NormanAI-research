@@ -6,6 +6,10 @@
   "resultType": "Companies",
   "newAtTop": true,
   "filterText": "Funding Date is after Jul 1, 2026 Last Funding Amount is greater than or equal to $5,000,000",
+  "filters": [
+    {"label": "Funding Date", "operator": "after", "value": "Jul 1, 2026"},
+    {"label": "Last Funding Amount", "operator": "greater than or equal to", "value": "$5,000,000"}
+  ],
   "resultCount": 187,
   "hasNext": true,
   "rows": [
