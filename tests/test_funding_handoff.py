@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -87,6 +88,22 @@ def test_build_handoff_matches_exact_contract_and_preserves_raw_facts() -> None:
     assert set(payload) == {"schemaVersion", "runId", "generatedAt", "events"}
     assert payload["schemaVersion"] == "norman.research.funding_handoff.v1"
     event = payload["events"][0]
+    assert set(event) == {
+        "eventKey",
+        "sourceName",
+        "sourceUrl",
+        "observedAt",
+        "company",
+        "crunchbaseUrl",
+        "website",
+        "linkedin",
+        "founders",
+        "description",
+        "founded",
+        "headquarters",
+        "industries",
+        "funding",
+    }
     assert isinstance(event["founders"], list)
     assert isinstance(event["industries"], list)
     assert event["funding"] == {
@@ -124,13 +141,52 @@ def test_write_handoff_is_atomic_and_refuses_overwrite(tmp_path: Path) -> None:
         write_handoff(path, payload)
 
 
+def test_write_handoff_does_not_expose_partial_target_during_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = request_payload(observation())
+    path = tmp_path / "request.json"
+    real_fdopen = os.fdopen
+
+    class ObservedWriter:
+        def __init__(self, fd: int, mode: str) -> None:
+            self._handle = real_fdopen(fd, mode)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def write(self, data: bytes) -> int:
+            first = self._handle.write(data[:1])
+            self._handle.flush()
+            assert not path.exists(), "partial request was visible at target path"
+            remainder = self._handle.write(data[1:])
+            return first + remainder
+
+        def flush(self) -> None:
+            self._handle.flush()
+
+        def fileno(self) -> int:
+            return self._handle.fileno()
+
+    monkeypatch.setattr(os, "fdopen", ObservedWriter)
+    write_handoff(path, payload)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == payload
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
         lambda result: result.update(schemaVersion="wrong"),
         lambda result: result.update(runId="wrong"),
         lambda result: result.update(requestDigest="0" * 64),
+        lambda result: result.update(mode="preview"),
         lambda result: result.update(complete=False),
+        lambda result: result.update(extra=True),
         lambda result: result["events"].clear(),
         lambda result: result["events"].append(dict(result["events"][0])),
         lambda result: result["events"][0].update(eventKey="f" * 64),
@@ -205,9 +261,15 @@ def test_invoke_uses_absolute_core_cli_and_mode_flags(
     )
 
     assert validated["mode"] == "dry_run"
-    assert calls[0][1] == str(script.resolve())
-    assert calls[0][-1] == "--dry-run"
-    assert "--write" not in calls[0]
+    assert calls[0] == [
+        sys.executable,
+        str(script.resolve()),
+        "--handoff",
+        str(request_path),
+        "--result",
+        str(result_path),
+        "--dry-run",
+    ]
 
 
 def test_invoke_write_uses_yes_and_nonzero_is_retryable(
@@ -232,6 +294,68 @@ def test_invoke_write_uses_yes_and_nonzero_is_retryable(
             request_path,
             result_path,
             write=True,
+            core_path=core,
+        )
+
+
+def test_nonzero_core_error_does_not_copy_environment_secret_into_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "core"
+    script = core / "scripts" / "crm_funding_handoff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    request_path = tmp_path / "request.json"
+    write_handoff(request_path, request_payload(observation()))
+    secret = "secret-notion-token"
+    monkeypatch.setenv("NOTION_TOKEN", secret)
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            75,
+            f"stdout leaked {secret}",
+            f"stderr leaked {secret}",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="retryable") as exc_info:
+        invoke_crm_handoff(
+            request_path,
+            tmp_path / "result.json",
+            write=True,
+            core_path=core,
+        )
+
+    assert secret not in str(exc_info.value)
+
+
+def test_timeout_remains_retryable_instead_of_consuming_stale_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "core"
+    script = core / "scripts" / "crm_funding_handoff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    request = request_payload(observation())
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    write_handoff(request_path, request)
+    result_path.write_text(
+        json.dumps(result_payload(request)),
+        encoding="utf-8",
+    )
+
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="retryable timeout"):
+        invoke_crm_handoff(
+            request_path,
+            result_path,
+            write=True,
+            timeout_seconds=17,
             core_path=core,
         )
 
