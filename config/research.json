@@ -9,8 +9,9 @@
     "note": "crm_intake.py is the ONLY Notion writer. Rows land at Status=Research and the CB/Careers/LinkedIn lanes enrich before the score agent scores. Research must not pre-empt any of that."
   },
   "crmCore": {
-    "path": "../NormanAI-crm-core",
-    "intake": "scripts/crm_intake.py"
+    "path": "../Core CRM",
+    "intake": "scripts/crm_intake.py",
+    "fundingHandoff": "scripts/crm_funding_handoff.py"
   },
   "caps": {
     "maxCandidatesPerRun": 60,

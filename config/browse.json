@@ -7,13 +7,13 @@
   "sources": [
     {
       "id": "cb_nyc_rounds",
-      "enabled": true,
+      "enabled": false,
       "label": "Crunchbase \u2014 saved search: NormanAI-research",
       "mode": "funding",
       "multiMode": false,
       "limit": 20,
       "url": "https://www.crunchbase.com/discover/funding_rounds",
-      "note": "PASTE YOUR SAVED SEARCH URL HERE \u2014 the placeholder above is a generic discover page and will return noise. Build the search on crunchbase.com (New York + last 30 days + Series A-C), save it as 'NormanAI-research', then copy the URL from the address bar. DISCOVERY ONLY: enrichment of companies already on the board stays with crm-core's crm_crunchbase_agent.py, so this lane must never write the funding fields that agent owns."
+      "note": "Disabled: the strict funding watcher owns the approved saved list. This generic discovery lane must not read or substitute for it."
     },
     {
       "id": "cb_nyc_companies",
@@ -49,9 +49,9 @@
   "cadence": {
     "runsPerDay": 2,
     "timesEastern": [
-      "06:30",
-      "13:00"
+      "07:15",
+      "14:15"
     ],
-    "note": "Crunchbase saved searches twice a weekday. The browser lane costs no search calls \u2014 only tokens \u2014 so the limit is Chrome's time, not budget."
+    "note": "Broader browser discovery runs away from the five strict funding-watcher slots; the strict funding watcher owns the approved saved list."
   }
 }

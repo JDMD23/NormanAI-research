@@ -1,0 +1,20 @@
+{
+  "pageUrl": "https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993",
+  "pageTitle": "Main Funding - July 2026 - Crunchbase",
+  "pageText": "Main Funding - July 2026\\nCompanies\\nNEW AT TOP\\nFunding Date is after Jul 1, 2026\\nLast Funding Amount is greater than or equal to $5,000,000\\n1-50 of 187 results",
+  "title": "Main Funding - July 2026",
+  "resultType": "Companies",
+  "newAtTop": true,
+  "filterText": "Funding Date is after Jul 1, 2026 Last Funding Amount is greater than or equal to $5,000,000",
+  "filters": [
+    {"label": "Funding Date", "operator": "after", "value": "Jul 1, 2026"},
+    {"label": "Last Funding Amount", "operator": "greater than or equal to", "value": "$5,000,000"}
+  ],
+  "resultCount": 187,
+  "hasNext": true,
+  "rows": [
+    {"company": "Weave", "crunchbaseUrl": "https://www.crunchbase.com/organization/weave-f27a", "fundingDate": "Jul 29, 2026", "fundingType": "Series A", "fundingAmount": "$13,500,000", "totalFunding": "$14,000,000", "numberOfFundingRounds": 2, "website": "https://www.weave.inc", "linkedin": "https://www.linkedin.com/company/weave-f27a", "headquarters": "New York, New York, United States", "founded": "2024", "description": "A collaboration platform.", "industries": ["Artificial Intelligence", "Software"], "founders": ["Example Founder"], "investors": ["Example Ventures"]},
+    {"company": "Plend", "crunchbaseUrl": "https://www.crunchbase.com/organization/plend", "fundingDate": "Jul 28, 2026", "fundingType": "Debt Financing", "fundingAmount": "£20M", "totalFunding": "£60.76M", "numberOfFundingRounds": 8, "website": "https://www.plend.co.uk", "linkedin": "https://www.linkedin.com/company/plend", "headquarters": "London, England, United Kingdom", "founded": "2020", "description": "A consumer lender.", "industries": ["Financial Services", "FinTech"], "founders": ["Robert Pasco"], "investors": ["Active Partners"]},
+    {"company": "Missing Identity Co", "crunchbaseUrl": "", "fundingDate": "Jul 28, 2026", "fundingType": "Seed", "fundingAmount": "$6M", "totalFunding": "$6M", "numberOfFundingRounds": 1, "website": "", "linkedin": "", "headquarters": "", "founded": "", "description": "", "industries": [], "founders": [], "investors": []}
+  ]
+}

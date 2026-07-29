@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Install, inspect, or remove the Research funding watcher LaunchAgent."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Callable
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+from lib.funding_handoff import (  # noqa: E402
+    REQUEST_SCHEMA_VERSION,
+    RESULT_SCHEMA_VERSION,
+)
+from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
+
+
+LABEL = "com.normanai.research.crunchbase-funding-watcher"
+CORE_LABEL = "com.normanai.crm-core.crunchbase-funding-watcher"
+WATCHER_RELATIVE_PATH = Path("scripts/funding_watcher.py")
+SCHEDULE = (
+    {"Hour": 6, "Minute": 0},
+    {"Hour": 10, "Minute": 0},
+    {"Hour": 13, "Minute": 0},
+    {"Hour": 16, "Minute": 0},
+    {"Hour": 19, "Minute": 0},
+)
+Runner = Callable[..., Any]
+OK, BAD_ARGS, DEPENDENCY, INTERNAL = 0, 64, 69, 70
+
+
+def render_plist(
+    repo_root: Path,
+    home: Path,
+    python: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> bytes:
+    root = repo_root.resolve()
+    command = shlex.join(
+        [
+            str(python.resolve()),
+            str(root / WATCHER_RELATIVE_PATH),
+            "check",
+            "--write",
+            "--yes",
+            "--enforce-schedule",
+        ]
+    )
+    payload = {
+        "Label": LABEL,
+        "ProgramArguments": [
+            "/usr/bin/env",
+            "-i",
+            f"HOME={home.resolve()}",
+            "PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "/bin/zsh",
+            "-lc",
+            f"exec {command}",
+        ],
+        "WorkingDirectory": str(root),
+        "StartCalendarInterval": [dict(item) for item in SCHEDULE],
+        "RunAtLoad": False,
+        "ProcessType": "Background",
+        "StandardOutPath": str(stdout_path),
+        "StandardErrorPath": str(stderr_path),
+    }
+    return plistlib.dumps(payload, sort_keys=True)
+
+
+def _paths(home: Path) -> dict[str, Path]:
+    logs = (
+        home
+        / "Library/Logs/NormanAI/Research/crunchbase-funding-watcher"
+    )
+    return {
+        "plist": home / "Library/LaunchAgents" / f"{LABEL}.plist",
+        "corePlist": home / "Library/LaunchAgents" / f"{CORE_LABEL}.plist",
+        "stdout": logs / "stdout.log",
+        "stderr": logs / "stderr.log",
+    }
+
+
+def _run(runner: Runner, command: list[str]) -> Any:
+    return runner(command, capture_output=True, text=True)
+
+
+def _loaded(runner: Runner, uid: int) -> bool:
+    return (
+        _run(runner, ["launchctl", "print", f"gui/{uid}/{LABEL}"]).returncode
+        == 0
+    )
+
+
+def _tracked(runner: Runner, root: Path) -> bool:
+    result = _run(
+        runner,
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "--error-unmatch",
+            WATCHER_RELATIVE_PATH.as_posix(),
+        ],
+    )
+    return result.returncode == 0
+
+
+def _load_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"configuration is unreadable: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"configuration must be an object: {path}")
+    return payload
+
+
+def _permanent(path: Path) -> bool:
+    return ".worktrees" not in path.resolve().parts
+
+
+def _prerequisites(
+    *,
+    repo_root: Path,
+    home: Path,
+    runner: Runner,
+) -> tuple[bool, str]:
+    root = repo_root.resolve()
+    watcher = root / WATCHER_RELATIVE_PATH
+    if not _permanent(root):
+        return False, "activation requires a permanent Research checkout"
+    if not watcher.is_file() or not _tracked(runner, root):
+        return False, "funding watcher must exist and be tracked by Git"
+    paths = _paths(home)
+    if paths["corePlist"].exists():
+        return False, "legacy CRM Core funding watcher plist must be absent"
+    try:
+        watcher_config = _load_object(root / "config/funding-watcher.json")
+        research_config = _load_object(root / "config/research.json")
+        state = Path(watcher_config["stateDirectory"]).expanduser()
+        ledger = FundingWatcherLedger(state / "ledger.json")
+        sources = watcher_config["sources"]
+        if (
+            not isinstance(sources, list)
+            or not sources
+            or any(
+                not isinstance(source, dict)
+                or not isinstance(source.get("url"), str)
+                or not ledger.bootstrap_complete(source["url"])
+                for source in sources
+            )
+        ):
+            return False, "Research funding ledger is not bootstrap-complete"
+        core_value = (research_config.get("crmCore") or {}).get("path")
+        if not isinstance(core_value, str) or not core_value.strip():
+            return False, "permanent CRM Core path is not configured"
+        core_root = Path(core_value).expanduser()
+        if not core_root.is_absolute():
+            core_root = root / core_root
+        core_root = core_root.resolve()
+        if not _permanent(core_root):
+            return False, "activation requires a permanent CRM Core checkout"
+        core_script = core_root / "scripts/crm_funding_handoff.py"
+        text = core_script.read_text(encoding="utf-8")
+        request_match = re.search(
+            r'^REQUEST_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
+        )
+        result_match = re.search(
+            r'^RESULT_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
+        )
+        if (
+            request_match is None
+            or result_match is None
+            or request_match.group(1) != REQUEST_SCHEMA_VERSION
+            or result_match.group(1) != RESULT_SCHEMA_VERSION
+            or watcher_config.get("crmResultSchemaVersion")
+            != RESULT_SCHEMA_VERSION
+        ):
+            return False, "Research and CRM handoff schemas do not match"
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o644)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _install(
+    *,
+    repo_root: Path,
+    home: Path,
+    python_path: Path,
+    runner: Runner,
+    uid: int,
+) -> int:
+    valid, reason = _prerequisites(
+        repo_root=repo_root, home=home, runner=runner
+    )
+    if not valid:
+        print(reason, file=sys.stderr)
+        return DEPENDENCY
+    paths = _paths(home)
+    paths["stdout"].parent.mkdir(parents=True, exist_ok=True)
+    payload = render_plist(
+        repo_root, home, python_path, paths["stdout"], paths["stderr"]
+    )
+    is_loaded = _loaded(runner, uid)
+    if paths["plist"].exists() and paths["plist"].read_bytes() == payload and is_loaded:
+        print(f"{LABEL} is already installed and loaded")
+        return OK
+    if is_loaded:
+        bootout = _run(
+            runner,
+            [
+                "launchctl",
+                "bootout",
+                f"gui/{uid}",
+                str(paths["plist"]),
+            ],
+        )
+        if bootout.returncode:
+            print("launchctl bootout failed", file=sys.stderr)
+            return INTERNAL
+    _atomic_write(paths["plist"], payload)
+    lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
+    if lint.returncode:
+        print("plist validation failed", file=sys.stderr)
+        return INTERNAL
+    loaded = _run(
+        runner,
+        [
+            "launchctl",
+            "bootstrap",
+            f"gui/{uid}",
+            str(paths["plist"]),
+        ],
+    )
+    if loaded.returncode:
+        print("launchctl bootstrap failed", file=sys.stderr)
+        return INTERNAL
+    print(f"installed and loaded {LABEL}")
+    return OK
+
+
+def _uninstall(*, home: Path, runner: Runner, uid: int) -> int:
+    plist = _paths(home)["plist"]
+    if _loaded(runner, uid):
+        result = _run(
+            runner,
+            ["launchctl", "bootout", f"gui/{uid}", str(plist)],
+        )
+        if result.returncode:
+            print("launchctl bootout failed; plist preserved", file=sys.stderr)
+            return INTERNAL
+    plist.unlink(missing_ok=True)
+    print(f"uninstalled {LABEL}; state and logs preserved")
+    return OK
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    repo_root: Path | None = None,
+    home: Path | None = None,
+    python_path: Path | None = None,
+    runner: Runner = subprocess.run,
+    uid: int | None = None,
+) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("install", "status", "uninstall"))
+    parser.add_argument("--yes", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return OK if exc.code == 0 else BAD_ARGS
+    if args.action in {"install", "uninstall"} and not args.yes:
+        print("install and uninstall require --yes", file=sys.stderr)
+        return BAD_ARGS
+    selected_home = (home or Path.home()).resolve()
+    selected_uid = os.getuid() if uid is None else uid
+    root = (repo_root or ROOT).resolve()
+    if args.action == "status":
+        plist_exists = _paths(selected_home)["plist"].exists()
+        service_loaded = _loaded(runner, selected_uid)
+        if plist_exists and service_loaded:
+            print(f"{LABEL} is installed and loaded")
+            return OK
+        print(
+            f"{LABEL}: plist={'present' if plist_exists else 'absent'}, "
+            f"service={'loaded' if service_loaded else 'not loaded'}"
+        )
+        return DEPENDENCY
+    if args.action == "uninstall":
+        return _uninstall(
+            home=selected_home, runner=runner, uid=selected_uid
+        )
+    return _install(
+        repo_root=root,
+        home=selected_home,
+        python_path=(python_path or Path(sys.executable)).resolve(),
+        runner=runner,
+        uid=selected_uid,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

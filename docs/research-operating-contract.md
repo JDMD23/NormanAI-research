@@ -10,15 +10,20 @@ two disagree, crm-core wins — it owns the board.
 
 ## 1. Where research sits
 
-```
-research  →  intake CSV  →  crm_intake.py  →  Status=Research, Need-* ON
-                                                       ↓
-                                     Crunchbase → Careers → LinkedIn → Score
+```text
+ordinary research → candidate CSV → crm_intake.py ─────────────────────┐
+strict CB watcher → typed JSON v1 → crm_funding_handoff.py ────────────┤
+                                                                        ↓
+                                             Status=Research, Need-* ON
+                                                                        ↓
+                                           Crunchbase → Careers → LinkedIn → Score
 ```
 
-Research is upstream of intake and nothing else. It has no opinion about what
-happens after a row is created, and it never revisits a company it has handed
-over — that is the enrichment lanes' job.
+Research is upstream of Core. Ordinary candidates use the CSV contract.
+Funding events from the one approved saved list use
+`norman.research.funding_handoff.v1`; Core answers with
+`norman.crm_core.funding_handoff_result.v1`. Both paths invoke Core-owned
+writers. Research has no Notion mutation client or property authority.
 
 ## 2. The one-writer rule
 
@@ -33,9 +38,9 @@ style preference:
 - The strangler blueprint's failure mode is two boards fighting. Two writers to
   one board is the same bug, one level down.
 
-If research ever needs the CRM to change, the answer is to emit a CSV or extend
-`crm_intake.py` — never to open a Notion client here. `scripts/lib/sinks.py` has
-no Notion write path, and that absence is deliberate.
+If research ever needs the CRM to change, it emits the documented CSV or typed
+funding-event JSON and invokes the matching Core CLI. It never opens a Notion
+write client here. `scripts/lib/sinks.py` has only a read-only board prefilter.
 
 ## 3. Research qualifies; crm-core scores
 
@@ -152,9 +157,9 @@ only one that reaches intake.
 become one. Section 2 still holds in full.
 
 Promotion needs three things co-located: this repo, the crm-core checkout, and
-`NOTION_TOKEN`. That is JD's Mac, where the Codex scheduler already runs the
-other lanes — so the full discover→promote loop belongs in the Codex registry,
-alongside `crm-core-crunchbase` and friends:
+`NOTION_TOKEN`. That is JD's Mac. If broader discovery is activated later, its
+discover→promote loop belongs in the scheduler separately from the strict
+funding watcher:
 
 | Job id | argv |
 |--------|------|
@@ -174,9 +179,26 @@ Guards on promotion, in order:
 6. everything lands at `Status=Research`, a machine status, so the score agent
    can exit it without touching anything JD owns
 
+## 10a. Strict funding-event watcher
+
+The only allowlisted source is:
+
+`https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993`
+
+Research owns source validation, browser reading, the event-key ledger,
+immutable receipts, scheduling, and retry. Core owns full-board identity,
+Notion mutation, readback, and the terminal result. The event key hashes the
+exact source URL, canonical Crunchbase organization URL, funding date,
+normalized funding type, integer minor units, and ISO currency.
+
+The preserved Core ledger is migrated read-only only when it proves 189 events:
+179 baseline and 10 created under one bootstrap source. Research never marks an
+event terminal until it has a validated durable Core result.
+
 ## 11. Hard forbidden
 
 - Writing Notion from this repo
+- Importing CRM Core's Notion client or calling `/v1/pages`
 - Writing Fit Score, Status, Top Pursuit, Priority, or any field crm-core lists
   as JD-owned
 - Emitting a candidate with no source URL

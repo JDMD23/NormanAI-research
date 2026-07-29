@@ -10,6 +10,8 @@ commit 4fc6ef0. If intake's aliases change, update this constant and let the
 test tell you what broke.
 """
 
+from pathlib import Path
+
 from lib.candidates import CSV_COLUMNS, Candidate
 
 CRM_CORE_CSV_ALIASES = {
@@ -73,3 +75,23 @@ def test_x_handle_is_canonicalised_to_url():
 
 def test_csv_row_keys_match_header_exactly():
     assert list(Candidate(company="Acme").csv_row().keys()) == CSV_COLUMNS
+
+
+def test_research_scripts_have_no_notion_write_authority():
+    """Research may query the database, but mutation belongs to CRM Core."""
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    violations = []
+    for path in scripts.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        lowered = text.casefold()
+        if (
+            "notion_client" in lowered
+            or "api.notion.com/v1/pages" in lowered
+            or 'method="patch"' in lowered
+            or "method='patch'" in lowered
+        ):
+            violations.append(str(path.relative_to(scripts.parent)))
+    assert not violations, (
+        "Research scripts must hand off to CRM Core instead of writing Notion: "
+        f"{violations}"
+    )
