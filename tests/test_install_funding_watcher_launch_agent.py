@@ -236,6 +236,30 @@ def test_rendered_plist_is_research_owned_sanitized_and_exact(
     assert payload["ProcessType"] == "Background"
 
 
+def test_rendered_plist_preserves_caller_selected_interpreter_symlink(
+    tmp_path: Path,
+) -> None:
+    """Catches Linux canonicalizing /usr/bin/python3 to a versioned target."""
+    interpreter_target = tmp_path / "python3.12"
+    interpreter_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    selected_interpreter = tmp_path / "python3"
+    selected_interpreter.symlink_to(interpreter_target.name)
+
+    payload = plistlib.loads(
+        render_plist(
+            tmp_path / "NormanAI Research",
+            tmp_path / "home",
+            selected_interpreter,
+            tmp_path / "logs/out.log",
+            tmp_path / "logs/err.log",
+        )
+    )
+
+    assert shlex.split(payload["ProgramArguments"][-1])[1] == str(
+        selected_interpreter
+    )
+
+
 def test_install_requires_yes_and_refuses_feature_worktree(tmp_path: Path) -> None:
     repo, home, _ = setup_checkout(tmp_path)
     assert main(["install"], repo_root=repo, home=home) == 64

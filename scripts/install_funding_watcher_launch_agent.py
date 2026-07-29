@@ -53,7 +53,7 @@ def render_plist(
     root = repo_root.resolve()
     command = shlex.join(
         [
-            str(python.resolve()),
+            str(python),
             str(root / WATCHER_RELATIVE_PATH),
             "check",
             "--write",
