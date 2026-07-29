@@ -117,9 +117,18 @@ class DailyCrunchbaseBudget:
         self.ceiling = ceiling
         self.lock_path = self.path.with_name("crunchbase-budget.lock")
 
-    def claim(self, now: datetime, *, requested: int, lane: str) -> int:
+    def claim(
+        self,
+        now: datetime,
+        *,
+        requested: int,
+        lane: str,
+        exact: bool = False,
+    ) -> int:
         _require_aware(now)
         _require_requested(requested)
+        if not isinstance(exact, bool):
+            raise ValueError("exact must be boolean")
         group = _require_lane(lane)
         if lane == WATCHER_LANE and requested > 2:
             raise ValueError(
@@ -127,15 +136,17 @@ class DailyCrunchbaseBudget:
             )
         with self._locked():
             payload = self._payload_for(now)
-            granted = min(
-                requested,
-                payload["ceiling"] - payload["used"],
-            )
+            available = payload["ceiling"] - payload["used"]
             if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
-                granted = min(
-                    granted,
+                available = min(
+                    available,
                     GROUP_LIMITS[group] - _group_used(payload, group),
                 )
+            granted = (
+                0
+                if exact and available < requested
+                else min(requested, available)
+            )
             payload["used"] += granted
             payload["lanes"][lane] = (
                 payload["lanes"].get(lane, 0) + granted

@@ -112,6 +112,26 @@ def test_detector_can_reserve_no_more_than_two_pages_per_source(
     assert budget.claim(now, requested=2, lane="research-funding-watcher") == 2
 
 
+def test_exact_claim_never_partially_consumes_remaining_capacity(
+    tmp_path: Path,
+) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
+    now = datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
+    assert budget.claim(
+        now,
+        requested=9,
+        lane="research-funding-bootstrap",
+    ) == 9
+
+    assert budget.claim(
+        now,
+        requested=2,
+        lane="research-funding-watcher",
+        exact=True,
+    ) == 0
+    assert budget.snapshot(now)["used"] == 9
+
+
 def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
     budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
     first = datetime(2026, 7, 29, 23, 59, tzinfo=NEW_YORK)
