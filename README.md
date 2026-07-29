@@ -12,8 +12,10 @@ approved CB list  → typed funding event → crm_funding_handoff.py ───�
 
 **Research finds and qualifies. It does not score.** Rows land at
 `Status=Research`; crm-core's Crunchbase, Careers, and LinkedIn lanes enrich
-them, and its score agent scores them. This repo never writes Notion —
-`crm_intake.py` is the single writer and owns hard dedup.
+them, and its score agent scores them. This repo never writes Notion. Ordinary
+candidate CSVs go to Core's `crm_intake.py`; typed funding-event JSON goes to
+Core's `crm_funding_handoff.py`. Neither handoff grants Research write
+authority; Core owns mutation and hard dedup.
 
 ## Two postures, running at once
 
@@ -100,6 +102,13 @@ It reads only the approved `Main Funding - July 2026` saved list, fingerprints
 each funding event, and sends a typed JSON request to CRM Core. Research never
 imports a Notion writer. A terminal Core result closes the event; a retryable
 result remains open for the next run.
+
+The default state root is
+`~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
+Immutable detector receipts are `receipts/<runId>.json`; Core handoff artifacts
+are `handoffs/<runId>.request.json` and `handoffs/<runId>.result.json`.
+`latest.json` is the current run summary and `migration-receipt.json` records
+the read-only legacy import.
 
 `--promote` invokes crm-core's `crm_intake.py` on the CSV, so companies reach
 the board with no human step. Research calls the writer rather than becoming
