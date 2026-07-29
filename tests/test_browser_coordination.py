@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from lib import chrome
 from lib.browser_coordination import (
+    BrowserLeaseUnavailable,
     DEFAULT_BROWSER_LOCK,
     DEFAULT_CRUNCHBASE_BUDGET,
     DailyCrunchbaseBudget,
@@ -44,6 +46,23 @@ def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> No
                 pass
 
 
+def test_chrome_lease_translates_shared_contention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches Chrome reverting to a private lock or leaking protocol errors."""
+    lock = tmp_path / "browser.lock"
+    monkeypatch.setattr(
+        chrome, "SharedBrowserLease", lambda: SharedBrowserLease(lock)
+    )
+
+    with SharedBrowserLease(lock):
+        with pytest.raises(chrome.ChromeUnavailable) as caught:
+            with chrome.lease():
+                pass
+
+    assert isinstance(caught.value.__cause__, BrowserLeaseUnavailable)
+
+
 def test_concurrent_budget_claims_never_exceed_25(tmp_path: Path) -> None:
     path = tmp_path / "budget.json"
     context = multiprocessing.get_context("fork")
@@ -58,6 +77,26 @@ def test_concurrent_budget_claims_never_exceed_25(tmp_path: Path) -> None:
     assert sum(grants) == 25
     assert payload["used"] == 25
     assert sum(payload["lanes"].values()) == 25
+
+
+def test_budget_persists_the_shared_core_json_contract(tmp_path: Path) -> None:
+    """Catches schema drift that would make Core and Research misread state."""
+    path = tmp_path / "budget.json"
+    budget = DailyCrunchbaseBudget(path)
+    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    assert budget.claim(now, requested=2, lane="research-funding-watcher") == 2
+    assert budget.claim(now, requested=3, lane="crm-core") == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-29",
+        "ceiling": 25,
+        "used": 5,
+        "lanes": {
+            "crm-core": 3,
+            "research-funding-watcher": 2,
+        },
+    }
 
 
 def test_detector_can_reserve_no_more_than_two_pages_per_source(
