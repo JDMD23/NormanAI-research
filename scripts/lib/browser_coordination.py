@@ -46,6 +46,19 @@ def shared_state_root() -> Path:
     return _PRODUCTION_SHARED_ROOT
 
 
+def _guard_test_state_path(path: Path) -> Path:
+    candidate = path.expanduser()
+    if os.environ.get("NORMANAI_TEST_MODE") != "1":
+        return candidate
+    try:
+        candidate.resolve().relative_to(_PRODUCTION_SHARED_ROOT.resolve())
+    except ValueError:
+        return candidate
+    raise RuntimeError(
+        "tests may not use the production shared state directory"
+    )
+
+
 @dataclass(frozen=True)
 class CoreCompanyReservation:
     granted: bool
@@ -61,7 +74,9 @@ class SharedBrowserLease:
     """Non-blocking process-wide lease shared by Core and Research."""
 
     def __init__(self, path: Path | None = None):
-        self.path = path or (shared_state_root() / "browser.lock")
+        self.path = _guard_test_state_path(
+            path or (shared_state_root() / "browser.lock")
+        )
         self._fd: int | None = None
 
     def __enter__(self) -> "SharedBrowserLease":
@@ -111,8 +126,8 @@ class DailyCrunchbaseBudget:
             or ceiling != APPROVED_CEILING
         ):
             raise ValueError("Crunchbase budget ceiling must equal 40")
-        self.path = path or (
-            shared_state_root() / "crunchbase-budget.json"
+        self.path = _guard_test_state_path(
+            path or (shared_state_root() / "crunchbase-budget.json")
         )
         self.ceiling = ceiling
         self.lock_path = self.path.with_name("crunchbase-budget.lock")

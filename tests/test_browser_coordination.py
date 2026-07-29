@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from lib.browser_coordination import DailyCrunchbaseBudget, SharedBrowserLease
+from lib.browser_coordination import (
+    DEFAULT_BROWSER_LOCK,
+    DEFAULT_CRUNCHBASE_BUDGET,
+    DailyCrunchbaseBudget,
+    SharedBrowserLease,
+)
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -32,6 +37,13 @@ def test_default_shared_paths_resolve_from_injected_root(
 
     assert SharedBrowserLease().path == tmp_path / "browser.lock"
     assert DailyCrunchbaseBudget().path == tmp_path / "crunchbase-budget.json"
+
+
+def test_test_runtime_rejects_explicit_production_state_paths() -> None:
+    with pytest.raises(RuntimeError, match="production shared state"):
+        SharedBrowserLease(DEFAULT_BROWSER_LOCK)
+    with pytest.raises(RuntimeError, match="production shared state"):
+        DailyCrunchbaseBudget(DEFAULT_CRUNCHBASE_BUDGET)
 
 
 def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> None:

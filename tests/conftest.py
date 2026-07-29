@@ -15,6 +15,7 @@ def isolate_runtime(
     shared = tmp_path / "shared-runtime"
     monkeypatch.setenv("NORMANAI_SHARED_STATE_DIR", str(shared))
     monkeypatch.setenv("NORMANAI_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("NORMANAI_TEST_MODE", "1")
     monkeypatch.delenv("NOTION_TOKEN", raising=False)
     monkeypatch.delenv("NOTION_API_KEY", raising=False)
     monkeypatch.delenv("XAI_API_KEY", raising=False)
