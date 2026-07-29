@@ -274,7 +274,10 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     legacy_note = legacy / "operator-note.txt"
     legacy_note.write_text("leave this file alone\n", encoding="utf-8")
     before = {
-        path.relative_to(legacy): path.read_bytes()
+        path.relative_to(legacy): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
         for path in sorted(legacy.rglob("*"))
         if path.is_file()
     }
@@ -288,7 +291,10 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
 
     assert first == second
     assert {
-        path.relative_to(legacy): path.read_bytes()
+        path.relative_to(legacy): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
         for path in sorted(legacy.rglob("*"))
         if path.is_file()
     } == before
