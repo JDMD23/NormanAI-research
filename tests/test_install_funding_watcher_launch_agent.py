@@ -30,16 +30,23 @@ class FakeRunner:
         loaded: bool = False,
         bootout_code: int = 0,
         bootstrap_code: int = 0,
+        bootstrap_codes: list[int] | None = None,
+        plutil_code: int = 0,
         tracked: bool = True,
         core_tracked: bool = True,
     ):
         self.loaded = loaded
         self.bootout_code = bootout_code
         self.bootstrap_code = bootstrap_code
+        self.bootstrap_codes = list(bootstrap_codes or [])
+        self.plutil_code = plutil_code
         self.tracked = tracked
         self.core_tracked = core_tracked
         self.calls: list[list[str]] = []
         self.bootout_plist_existed: list[bool] = []
+        self.plist_observations: list[
+            tuple[str, bytes | None, int | None]
+        ] = []
 
     def __call__(self, command, **kwargs):
         command = [str(part) for part in command]
@@ -54,8 +61,21 @@ class FakeRunner:
                 returncode=self.bootout_code, stdout="", stderr="bootout failed"
             )
         if command[:2] == ["launchctl", "bootstrap"]:
+            self._observe_plist("bootstrap", Path(command[-1]))
+            code = (
+                self.bootstrap_codes.pop(0)
+                if self.bootstrap_codes
+                else self.bootstrap_code
+            )
             return SimpleNamespace(
-                returncode=self.bootstrap_code, stdout="", stderr="bootstrap failed"
+                returncode=code, stdout="", stderr="bootstrap failed"
+            )
+        if command[:2] == ["plutil", "-lint"]:
+            self._observe_plist("lint", Path(command[-1]))
+            return SimpleNamespace(
+                returncode=self.plutil_code,
+                stdout="",
+                stderr="plist validation failed",
             )
         if command and command[0] == "git":
             tracked = (
@@ -67,6 +87,15 @@ class FakeRunner:
                 returncode=0 if tracked else 1, stdout="", stderr=""
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _observe_plist(self, action: str, path: Path) -> None:
+        self.plist_observations.append(
+            (
+                action,
+                path.read_bytes() if path.exists() else None,
+                path.stat().st_mode & 0o777 if path.exists() else None,
+            )
+        )
 
 
 def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -126,6 +155,16 @@ def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
         )
     )
     return repo, home, core
+
+
+def prior_plist_payload() -> bytes:
+    return plistlib.dumps(
+        {
+            "Label": LABEL,
+            "ProgramArguments": ["/usr/bin/true"],
+            "RunAtLoad": False,
+        }
+    )
 
 
 def test_rendered_plist_is_research_owned_sanitized_and_exact(
@@ -517,6 +556,152 @@ def test_atomic_install_preserves_existing_plist_when_replace_fails(
     assert list(plist.parent.glob(f".{plist.name}.*.tmp")) == []
     assert not any(
         call[:2] == ["launchctl", "bootstrap"] for call in runner.calls
+    )
+
+
+def test_lint_failure_restores_prior_plist_mode_and_loaded_service(
+    tmp_path: Path,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o600)
+    runner = FakeRunner(loaded=True, plutil_code=5)
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o600
+    assert runner.plist_observations[0][0] == "lint"
+    assert runner.plist_observations[0][1] != prior_payload
+    assert runner.plist_observations[1] == (
+        "bootstrap",
+        prior_payload,
+        0o600,
+    )
+    lifecycle = [
+        call[:2]
+        for call in runner.calls
+        if call[0] in {"launchctl", "plutil"}
+    ]
+    assert lifecycle == [
+        ["launchctl", "print"],
+        ["launchctl", "bootout"],
+        ["plutil", "-lint"],
+        ["launchctl", "bootstrap"],
+    ]
+
+
+def test_bootstrap_failure_restores_prior_plist_mode_and_loaded_service(
+    tmp_path: Path,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o640)
+    runner = FakeRunner(loaded=True, bootstrap_codes=[5, 0])
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o640
+    assert runner.plist_observations[0][0] == "lint"
+    assert runner.plist_observations[0][1] != prior_payload
+    assert runner.plist_observations[1][0] == "bootstrap"
+    assert runner.plist_observations[1][1] != prior_payload
+    assert runner.plist_observations[2] == (
+        "bootstrap",
+        prior_payload,
+        0o640,
+    )
+    lifecycle = [
+        call[:2]
+        for call in runner.calls
+        if call[0] in {"launchctl", "plutil"}
+    ]
+    assert lifecycle == [
+        ["launchctl", "print"],
+        ["launchctl", "bootout"],
+        ["plutil", "-lint"],
+        ["launchctl", "bootstrap"],
+        ["launchctl", "bootstrap"],
+    ]
+
+
+@pytest.mark.parametrize("failed_stage", ["lint", "bootstrap"])
+def test_failed_first_install_removes_candidate_plist(
+    tmp_path: Path,
+    failed_stage: str,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    runner = (
+        FakeRunner(plutil_code=5)
+        if failed_stage == "lint"
+        else FakeRunner(bootstrap_codes=[5])
+    )
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+    assert not plist.exists()
+    assert list(plist.parent.glob(f".{plist.name}.*.tmp")) == []
+
+
+def test_bootstrap_failure_reports_failed_prior_service_reload(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o600)
+    runner = FakeRunner(loaded=True, bootstrap_codes=[5, 6])
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert "launchctl bootstrap failed" in error
+    assert "rollback" in error
+    assert "reload" in error
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o600
+    assert runner.plist_observations[-1] == (
+        "bootstrap",
+        prior_payload,
+        0o600,
     )
 
 
