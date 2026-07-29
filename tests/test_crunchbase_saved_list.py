@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -166,14 +168,112 @@ def test_live_crunchbase_filter_control_formats_match_contract(
     assert result.result_count == payload["resultCount"]
 
 
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"resultType": "People"}, "result_type"),
+        ({"newAtTop": False}, "sort"),
+    ],
+)
+def test_global_page_text_cannot_mask_visible_result_or_sort_drift(
+    payload: dict,
+    changes: dict,
+    reason: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=reason):
+        parse_saved_list_snapshot(
+            {
+                **payload,
+                **changes,
+                "pageText": (
+                    "Companies NEW AT TOP "
+                    "Last Funding Date after Jul 1, 2026 "
+                    "Last Funding Amount greater than or equal to $5M"
+                ),
+            },
+            SOURCE,
+            OBSERVED_AT,
+        )
+
+
+def test_browser_snapshot_reads_result_type_and_sort_from_visible_controls() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the generated browser snapshot")
+    harness = r"""
+const fs = require("fs");
+const javascript = fs.readFileSync(0, "utf8");
+const element = (value, attributes = {}) => ({
+  innerText: value,
+  textContent: value,
+  tagName: attributes.tagName || "DIV",
+  value: attributes.value || "",
+  className: "",
+  getAttribute: name => attributes[name] || null,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+});
+const predicate = (label, operator, value) => {
+  const field = element(label, {"aria-label": label});
+  const input = element("", {tagName: "INPUT", value});
+  return {
+    querySelector: selector =>
+      selector.includes(".mat-mdc-select-min-line") ? element(operator) : field,
+    querySelectorAll: () => [input],
+  };
+};
+const predicates = [
+  predicate("Last Funding Date", "after", "07/01/2026"),
+  predicate("Last Funding Amount", "greater than or equal to", "5,000,000"),
+];
+global.location = {href: process.argv[1]};
+global.document = {
+  title: "Main Funding - July 2026 - Crunchbase",
+  readyState: "complete",
+  body: {
+    innerText:
+      "Companies NEW AT TOP Last Funding Date after Jul 1, 2026 " +
+      "Last Funding Amount greater than or equal to $5M 0 results",
+  },
+  querySelectorAll: selector => selector === "predicate" ? predicates : [],
+  querySelector: selector => {
+    if (selector.includes("saved-search-name")) {
+      return element("Main Funding - July 2026");
+    }
+    if (selector.includes("result-type")) {
+      return element("People");
+    }
+    if (selector.includes("sort-order")) {
+      return element("OLDEST AT TOP");
+    }
+    return null;
+  },
+};
+process.stdout.write(eval(javascript));
+"""
+    completed = subprocess.run(
+        [node, "-e", harness, SOURCE.url],
+        input=browser_snapshot_javascript(SOURCE),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    snapshot = json.loads(completed.stdout)
+
+    assert snapshot["resultType"] == "People"
+    assert snapshot["newAtTop"] is False
+
+
 class FakeTransport:
     def __init__(self, states: list[dict]) -> None:
         self.states, self.opened, self.reset_urls, self.closed, self.restored = list(states), [], [], [], False
+        self.advance_calls = 0
     def open_dedicated_tab(self, url: str) -> str:
         self.opened.append(url); return "window-1:tab-2"
     def evaluate(self, tab_ref: str, javascript: str) -> str:
         return json.dumps(self.states.pop(0))
     def advance_to_next_page(self, tab_ref: str) -> bool:
+        self.advance_calls += 1
         return bool(self.states)
     def reset_to_source(self, tab_ref: str, url: str) -> None:
         self.reset_urls.append(url)
@@ -190,11 +290,52 @@ def test_browser_auth_wall_fails_closed_and_restores_active_tab() -> None:
     assert transport.restored is True
 
 
+@pytest.mark.parametrize(
+    ("blocker", "reason"),
+    [
+        ({"captchaDetected": True}, "captcha"),
+        ({"securityChallengeDetected": True}, "security_challenge"),
+    ],
+)
+def test_browser_blockers_fail_closed_before_parsing(
+    payload: dict,
+    blocker: dict,
+    reason: str,
+) -> None:
+    transport = FakeTransport([{**payload, **blocker}])
+    with pytest.raises(CrunchbaseSavedListBlocked, match=reason):
+        CrunchbaseSavedListBrowser(transport=transport).read_source(
+            SOURCE,
+            observed_at=OBSERVED_AT,
+            max_pages=2,
+        )
+    assert transport.closed == ["window-1:tab-2"]
+    assert transport.restored is True
+
+
 def test_browser_requires_complete_pages_and_stable_pagination(payload: dict) -> None:
     incomplete = {**payload, "resultCount": 51, "rows": [payload["rows"][0]], "gridRowCount": 1, "hasNext": True}
     transport = FakeTransport([incomplete] * 10_000)
     with pytest.raises(CrunchbaseSavedListDrift, match="timed out"):
         CrunchbaseSavedListBrowser(transport=transport, sleeper=lambda _: None, wait_timeout=0.001).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
+    assert transport.restored is True
+
+
+def test_browser_rejects_thin_empty_saved_list_page(payload: dict) -> None:
+    thin = {
+        **payload,
+        "rows": [],
+        "gridRowCount": 0,
+        "resultCount": 0,
+        "hasNext": False,
+    }
+    transport = FakeTransport([thin] * 10_000)
+    with pytest.raises(CrunchbaseSavedListDrift, match="timed out"):
+        CrunchbaseSavedListBrowser(
+            transport=transport,
+            sleeper=lambda _: None,
+            wait_timeout=0.001,
+        ).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
     assert transport.restored is True
 
 
@@ -205,6 +346,109 @@ def test_browser_returns_complete_snapshot_closes_temporary_tab_and_restores_tab
     assert [row.company for row in result.observations] == ["Weave", "Plend"]
     assert transport.opened == [SOURCE.url]
     assert transport.closed == ["window-1:tab-2"]
+    assert transport.restored is True
+
+
+def _funding_row(payload: dict, index: int) -> dict:
+    return {
+        **payload["rows"][0],
+        "company": f"Company {index}",
+        "crunchbaseUrl": (
+            f"https://www.crunchbase.com/organization/company-{index}"
+        ),
+    }
+
+
+def test_browser_returns_complete_multi_page_snapshot(payload: dict) -> None:
+    first = {
+        **payload,
+        "resultCount": 51,
+        "rows": [_funding_row(payload, index) for index in range(50)],
+        "gridRowCount": 50,
+        "hasNext": True,
+    }
+    second = {
+        **payload,
+        "pageUrl": (
+            SOURCE.url
+            + "?pageId=2_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd"
+        ),
+        "resultCount": 51,
+        "rows": [_funding_row(payload, 50)],
+        "gridRowCount": 1,
+        "hasNext": False,
+    }
+    transport = FakeTransport([first, second])
+
+    result = CrunchbaseSavedListBrowser(transport=transport).read_source(
+        SOURCE,
+        observed_at=OBSERVED_AT,
+        max_pages=2,
+    )
+
+    assert result.page_count == 2
+    assert len(result.observations) == 51
+    assert result.observations[-1].company == "Company 50"
+    assert transport.advance_calls == 1
+    assert transport.restored is True
+
+
+def test_browser_fails_closed_when_promised_next_page_is_unavailable(
+    payload: dict,
+) -> None:
+    first = {
+        **payload,
+        "resultCount": 51,
+        "rows": [_funding_row(payload, index) for index in range(50)],
+        "gridRowCount": 50,
+        "hasNext": True,
+    }
+    transport = FakeTransport([first])
+
+    with pytest.raises(CrunchbaseSavedListDrift, match="pagination"):
+        CrunchbaseSavedListBrowser(transport=transport).read_source(
+            SOURCE,
+            observed_at=OBSERVED_AT,
+            max_pages=2,
+        )
+
+    assert transport.advance_calls == 1
+    assert transport.restored is True
+
+
+def test_browser_rejects_result_count_change_during_pagination(
+    payload: dict,
+) -> None:
+    first = {
+        **payload,
+        "resultCount": 51,
+        "rows": [_funding_row(payload, index) for index in range(50)],
+        "gridRowCount": 50,
+        "hasNext": True,
+    }
+    changed = {
+        **payload,
+        "pageUrl": (
+            SOURCE.url
+            + "?pageId=2_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd"
+        ),
+        "resultCount": 52,
+        "rows": [
+            _funding_row(payload, 50),
+            _funding_row(payload, 51),
+        ],
+        "gridRowCount": 2,
+        "hasNext": False,
+    }
+    transport = FakeTransport([first, changed])
+
+    with pytest.raises(CrunchbaseSavedListDrift, match="result count changed"):
+        CrunchbaseSavedListBrowser(transport=transport).read_source(
+            SOURCE,
+            observed_at=OBSERVED_AT,
+            max_pages=2,
+        )
+
     assert transport.restored is True
 
 
@@ -221,13 +465,27 @@ def test_browser_rejects_page_id_on_the_initial_source_page(payload: dict) -> No
 
 
 def test_browser_rejects_skipped_or_stale_page_id_during_pagination(payload: dict) -> None:
-    def row(index: int) -> dict:
-        return {**payload["rows"][0], "company": f"Company {index}", "crunchbaseUrl": f"https://www.crunchbase.com/organization/company-{index}"}
-
-    first = {**payload, "resultCount": 51, "rows": [row(index) for index in range(50)], "gridRowCount": 50, "hasNext": True}
-    skipped = {**payload, "pageUrl": SOURCE.url + "?pageId=3_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd", "resultCount": 51, "rows": [row(50)], "gridRowCount": 1, "hasNext": False}
+    first = {**payload, "resultCount": 51, "rows": [_funding_row(payload, index) for index in range(50)], "gridRowCount": 50, "hasNext": True}
+    skipped = {**payload, "pageUrl": SOURCE.url + "?pageId=3_a_769350d3-c7ec-440d-a1c8-76b4dc0c93cd", "resultCount": 51, "rows": [_funding_row(payload, 50)], "gridRowCount": 1, "hasNext": False}
     with pytest.raises(CrunchbaseSavedListDrift, match="page position"):
         CrunchbaseSavedListBrowser(transport=FakeTransport([first, skipped])).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
+
+
+def test_browser_rejects_wrong_live_page(payload: dict) -> None:
+    wrong = {
+        **payload,
+        "pageUrl": "https://www.crunchbase.com/organization/weave-f27a",
+    }
+    transport = FakeTransport([wrong] * 10_000)
+
+    with pytest.raises(CrunchbaseSavedListDrift, match="timed out"):
+        CrunchbaseSavedListBrowser(
+            transport=transport,
+            sleeper=lambda _: None,
+            wait_timeout=0.001,
+        ).read_source(SOURCE, observed_at=OBSERVED_AT, max_pages=2)
+
+    assert transport.restored is True
 
 
 def test_browser_refuses_non_saved_list_navigation() -> None:
