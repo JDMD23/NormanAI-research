@@ -160,10 +160,20 @@ def load_watcher_config(path: Path) -> dict[str, Any]:
     hours = payload.get("scheduleHours")
     if (not isinstance(hours, list) or not hours or any(not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23 for hour in hours) or hours != sorted(hours) or len(hours) != len(set(hours))):
         raise ValueError("scheduleHours must be a sorted unique list of integer hours")
-    for key in ("scheduledMaxPagesPerSource", "bootstrapMaxPagesPerSource", "bootstrapSeedTop", "dailyPageLoadCeiling"):
+    for key in (
+        "scheduledMaxPagesPerSource",
+        "bootstrapMaxPagesPerSource",
+        "bootstrapSeedTop",
+        "sharedWorkItemCeiling",
+        "researchDailyCheckLimit",
+    ):
         _positive_int(payload, key)
     if payload["scheduledMaxPagesPerSource"] > 2:
         raise ValueError("scheduledMaxPagesPerSource must not exceed 2")
+    if payload["sharedWorkItemCeiling"] != 40:
+        raise ValueError("sharedWorkItemCeiling must equal 40")
+    if payload["researchDailyCheckLimit"] != 10:
+        raise ValueError("researchDailyCheckLimit must equal 10")
     for key in ("stateDirectory", "legacyStateDirectory", "crmResultSchemaVersion"):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
