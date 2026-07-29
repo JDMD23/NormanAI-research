@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from lib.crunchbase_saved_list import (
     load_watcher_config,
     parse_saved_list_snapshot,
@@ -16,14 +18,16 @@ from lib.funding_watcher_state import funding_event_key
 
 
 RESEARCH_ROOT = Path(__file__).resolve().parents[1]
-CORE_ROOT = Path(
-    "/Users/normanai/Documents/Core CRM/.worktrees/crunchbase-funding-watcher"
-)
+CORE_ACCEPTANCE_ENV = "NORMAN_CRM_CORE_ACCEPTANCE_PATH"
 NEW_YORK_ACCEPTANCE_TIME = "2026-07-29T10:15:00-04:00"
 SHARED_RELATIVE_ROOT = Path(
     "Library/Application Support/NormanAI/shared"
 )
 WATCHER_LANE = "research-funding-watcher"
+CORE_REQUIRED_PATHS = (
+    Path("scripts/lib/browser_coordination.py"),
+    Path("scripts/crm_funding_handoff.py"),
+)
 
 RESEARCH_PROBE = r"""
 import json
@@ -137,6 +141,45 @@ def _isolated_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _resolve_core_root() -> Path | None:
+    declared = os.environ.get(CORE_ACCEPTANCE_ENV)
+    if declared:
+        candidate = Path(declared).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"{CORE_ACCEPTANCE_ENV} must be absolute")
+        candidate = candidate.resolve()
+        if not all((candidate / relative).is_file() for relative in CORE_REQUIRED_PATHS):
+            raise ValueError(
+                f"{CORE_ACCEPTANCE_ENV} is not a NormanAI-crm-core checkout"
+            )
+        return candidate
+
+    candidates = (
+        RESEARCH_ROOT.parent / "NormanAI-crm-core",
+        RESEARCH_ROOT.parent / "normanai-crm-core",
+        RESEARCH_ROOT.parent / "crunchbase-funding-watcher",
+        RESEARCH_ROOT.parents[1],
+    )
+    for candidate in candidates:
+        if all((candidate / relative).is_file() for relative in CORE_REQUIRED_PATHS):
+            return candidate.resolve()
+    return None
+
+
+@pytest.fixture(scope="module")
+def core_root() -> Path:
+    try:
+        resolved = _resolve_core_root()
+    except ValueError as exc:
+        pytest.fail(str(exc))
+    if resolved is None:
+        pytest.skip(
+            f"cross-repository acceptance requires {CORE_ACCEPTANCE_ENV} "
+            "or a validated sibling Core checkout"
+        )
+    return resolved
+
+
 def _probe(
     root: Path,
     program: str,
@@ -154,6 +197,25 @@ def _probe(
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
+
+
+def _failed_probe(
+    root: Path,
+    program: str,
+    home: Path,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        [sys.executable, "-c", program, *arguments],
+        cwd=root,
+        env=_isolated_env(home),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert completed.returncode != 0
+    return completed
 
 
 def _research_claim(
@@ -174,13 +236,14 @@ def _research_claim(
 
 
 def _core_claim(
+    core_root: Path,
     home: Path,
     now: str,
     requested: int,
     lane: str,
 ) -> int:
     return _probe(
-        CORE_ROOT,
+        core_root,
         CORE_PROBE,
         home,
         "claim",
@@ -192,6 +255,7 @@ def _core_claim(
 
 def test_default_constructors_share_real_lease_and_one_public_v1_budget(
     tmp_path: Path,
+    core_root: Path,
 ) -> None:
     """Catches either repository drifting to a private default coordination path."""
     home = tmp_path / "coordination-home"
@@ -213,7 +277,7 @@ def test_default_constructors_share_real_lease_and_one_public_v1_budget(
             raise AssertionError(holder.stderr.read())
         assert json.loads(ready) == {"held": True}
         assert _probe(
-            CORE_ROOT,
+            core_root,
             CORE_PROBE,
             home,
             "lease",
@@ -234,14 +298,18 @@ def test_default_constructors_share_real_lease_and_one_public_v1_budget(
     assert _research_claim(
         home, NEW_YORK_ACCEPTANCE_TIME, 10, research_lane
     ) == 10
-    assert _core_claim(home, NEW_YORK_ACCEPTANCE_TIME, 15, core_lane) == 15
+    assert _core_claim(
+        core_root, home, NEW_YORK_ACCEPTANCE_TIME, 15, core_lane
+    ) == 15
     assert _research_claim(
         home, NEW_YORK_ACCEPTANCE_TIME, 1, research_lane
     ) == 0
-    assert _core_claim(home, NEW_YORK_ACCEPTANCE_TIME, 1, core_lane) == 0
+    assert _core_claim(
+        core_root, home, NEW_YORK_ACCEPTANCE_TIME, 1, core_lane
+    ) == 0
 
     public_state = _probe(
-        CORE_ROOT,
+        core_root,
         CORE_PROBE,
         home,
         "snapshot",
@@ -264,6 +332,7 @@ def test_default_constructors_share_real_lease_and_one_public_v1_budget(
 
 def test_scheduled_research_lanes_decorate_and_cap_each_new_york_hour(
     tmp_path: Path,
+    core_root: Path,
 ) -> None:
     """Catches slot decoration or prefix aggregation bypassing the two-page cap."""
     home = tmp_path / "scheduled-home"
@@ -278,7 +347,7 @@ def test_scheduled_research_lanes_decorate_and_cap_each_new_york_hour(
     assert _research_claim(home, one_fifty_nine, 2, WATCHER_LANE) == 0
 
     public_state = _probe(
-        CORE_ROOT,
+        core_root,
         CORE_PROBE,
         home,
         "snapshot",
@@ -299,6 +368,7 @@ def test_scheduled_research_lanes_decorate_and_cap_each_new_york_hour(
 
 def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
     tmp_path: Path,
+    core_root: Path,
 ) -> None:
     """Catches request-schema or fingerprint drift at the public Core boundary."""
     config = load_watcher_config(
@@ -367,7 +437,7 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
             str(result_path),
             "--dry-run",
         ],
-        cwd=CORE_ROOT,
+        cwd=core_root,
         env=_isolated_env(tmp_path / "core-cli-home"),
         text=True,
         capture_output=True,
@@ -390,3 +460,97 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
             "reason": "no_hard_match",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("program_name", "home_name"),
+    [
+        ("research", "research-stale-valid"),
+        ("core", "core-stale-valid"),
+    ],
+)
+def test_both_repositories_reset_only_a_valid_prior_day_budget(
+    tmp_path: Path,
+    core_root: Path,
+    program_name: str,
+    home_name: str,
+) -> None:
+    home = tmp_path / home_name
+    state = home / SHARED_RELATIVE_ROOT / "crunchbase-budget.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "norman.shared.crunchbase_budget.v1",
+                "date": "2026-07-28",
+                "ceiling": 25,
+                "used": 25,
+                "lanes": {"prior": 25},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    root, probe = (
+        (RESEARCH_ROOT, RESEARCH_PROBE)
+        if program_name == "research"
+        else (core_root, CORE_PROBE)
+    )
+
+    assert _probe(
+        root,
+        probe,
+        home,
+        "snapshot",
+        NEW_YORK_ACCEPTANCE_TIME,
+    ) == {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-29",
+        "ceiling": 25,
+        "used": 0,
+        "lanes": {},
+    }
+
+
+@pytest.mark.parametrize(
+    ("persisted_date", "lanes"),
+    [
+        ("2026-07-28", {"prior": 24}),
+        ("2026-07-30", {"future": 25}),
+    ],
+)
+@pytest.mark.parametrize("program_name", ["research", "core"])
+def test_both_repositories_fail_closed_without_rewriting_invalid_date_state(
+    tmp_path: Path,
+    core_root: Path,
+    persisted_date: str,
+    lanes: dict[str, int],
+    program_name: str,
+) -> None:
+    home = tmp_path / f"{program_name}-{persisted_date}"
+    state = home / SHARED_RELATIVE_ROOT / "crunchbase-budget.json"
+    state.parent.mkdir(parents=True)
+    payload = {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": persisted_date,
+        "ceiling": 25,
+        "used": 25,
+        "lanes": lanes,
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    state.write_text(serialized, encoding="utf-8")
+    root, probe = (
+        (RESEARCH_ROOT, RESEARCH_PROBE)
+        if program_name == "research"
+        else (core_root, CORE_PROBE)
+    )
+
+    _failed_probe(
+        root,
+        probe,
+        home,
+        "snapshot",
+        NEW_YORK_ACCEPTANCE_TIME,
+    )
+
+    assert state.read_text(encoding="utf-8") == serialized

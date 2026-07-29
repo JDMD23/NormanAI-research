@@ -160,16 +160,53 @@ def run_check(
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
             receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
-            if snapshot.result_count != (
-                len(snapshot.observations) + len(snapshot.rejections)
+            covered_rows = len(snapshot.observations) + len(snapshot.rejections)
+            if (
+                not snapshot.new_at_top
+                or snapshot.source.expected_sort.casefold() != "new at top"
             ):
                 return _finish(
                     state_root,
                     receipt,
                     "source_drift",
-                    "incomplete_snapshot_coverage",
+                    "new_at_top_contract_failed",
                 )
-            for row in snapshot.observations:
+            if covered_rows > snapshot.result_count:
+                return _finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "invalid_snapshot_coverage",
+                )
+            rows_to_diff = snapshot.observations
+            if covered_rows < snapshot.result_count:
+                if snapshot.rejections:
+                    return _finish(
+                        state_root,
+                        receipt,
+                        "source_drift",
+                        "ambiguous_truncated_snapshot",
+                    )
+                anchor_index = next(
+                    (
+                        index
+                        for index, row in enumerate(snapshot.observations)
+                        if dependencies.ledger.is_terminal(
+                            funding_event_key(row)
+                        )
+                    ),
+                    None,
+                )
+                if anchor_index is None:
+                    return _finish(
+                        state_root,
+                        receipt,
+                        "source_drift",
+                        "missing_terminal_high_water_anchor",
+                    )
+                receipt["counts"]["already_terminal"] += 1
+                rows_to_diff = snapshot.observations[:anchor_index]
+            for row in rows_to_diff:
                 key = funding_event_key(row)
                 if dependencies.ledger.is_terminal(key):
                     receipt["counts"]["already_terminal"] += 1

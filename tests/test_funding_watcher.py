@@ -640,9 +640,202 @@ def test_check_rejects_incomplete_snapshot_before_diff_or_core(
     )
 
     assert receipt["status"] == "source_drift"
-    assert receipt["stopReason"] == "incomplete_snapshot_coverage"
+    assert receipt["stopReason"] == "missing_terminal_high_water_anchor"
     assert calls == []
     assert deps.ledger.events == {}
+
+
+def _mark_terminal(
+    ledger: FundingWatcherLedger,
+    row: FundingObservation,
+    *,
+    run_id: str = "prior-run",
+) -> None:
+    key = funding_event_key(row)
+    ledger.observe(key, observed_at=row.observed_at)
+    ledger.mark_handoff_pending(
+        key,
+        run_id=run_id,
+        observed_at=row.observed_at,
+    )
+    ledger.mark_terminal(
+        key,
+        outcome="created",
+        page_id=f"page-{key[:8]}",
+        observed_at=row.observed_at,
+    )
+
+
+def test_truncated_new_at_top_snapshot_hands_off_only_prefix_before_anchor_once(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(100)]
+    requests: list[dict] = []
+    deps = dependencies(tmp_path, FakeBrowser(rows, result_count=195))
+    _mark_terminal(deps.ledger, rows[3])
+
+    def invoke(request: dict, write: bool) -> dict:
+        requests.append(request)
+        return core_result(request, write=write)
+
+    deps.invoke_handoff = invoke
+
+    first = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+    second = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert first["status"] == "complete"
+    assert first["counts"]["new_events"] == 3
+    assert first["counts"]["already_terminal"] == 1
+    assert [event["eventKey"] for event in requests[0]["events"]] == [
+        funding_event_key(row) for row in rows[:3]
+    ]
+    assert second["status"] == "complete"
+    assert second["counts"]["new_events"] == 0
+    assert second["counts"]["already_terminal"] == 1
+    assert len(requests) == 1
+    assert funding_event_key(rows[4]) not in deps.ledger.events
+
+
+def test_truncated_new_at_top_snapshot_with_first_row_anchor_is_zero_change(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(100)]
+    calls: list[dict] = []
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(rows, result_count=195),
+        invoke=lambda request, write: calls.append(request),
+    )
+    _mark_terminal(deps.ledger, rows[0])
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "complete"
+    assert receipt["counts"]["new_events"] == 0
+    assert receipt["counts"]["already_terminal"] == 1
+    assert calls == []
+    assert len(deps.ledger.events) == 1
+
+
+def test_truncated_all_new_window_fails_before_core_or_state_mutation(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(100)]
+    calls: list[dict] = []
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(rows, result_count=195),
+        invoke=lambda request, write: calls.append(request),
+    )
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "missing_terminal_high_water_anchor"
+    assert calls == []
+    assert deps.ledger.events == {}
+    assert not deps.ledger.path.exists()
+
+
+def test_truncated_snapshot_parse_rejection_is_ambiguous_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(99)]
+    calls: list[dict] = []
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(rows, result_count=195, rejections=1),
+        invoke=lambda request, write: calls.append(request),
+    )
+    _mark_terminal(deps.ledger, rows[2])
+    before = deps.ledger.path.read_bytes()
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "ambiguous_truncated_snapshot"
+    assert calls == []
+    assert deps.ledger.path.read_bytes() == before
+
+
+def test_truncated_snapshot_requires_new_at_top_sort_before_diff(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(100)]
+    browser = FakeBrowser(rows, result_count=195)
+    original_read = browser.read_source
+
+    def drifted_read(source, *, observed_at: str, max_pages: int):
+        snapshot = original_read(
+            source,
+            observed_at=observed_at,
+            max_pages=max_pages,
+        )
+        return SavedListSnapshot(
+            source=snapshot.source,
+            title=snapshot.title,
+            result_type=snapshot.result_type,
+            new_at_top=False,
+            filter_text=snapshot.filter_text,
+            result_count=snapshot.result_count,
+            page_count=snapshot.page_count,
+            top_funding_date=snapshot.top_funding_date,
+            observations=snapshot.observations,
+            rejections=snapshot.rejections,
+        )
+
+    browser.read_source = drifted_read
+    calls: list[dict] = []
+    deps = dependencies(
+        tmp_path,
+        browser,
+        invoke=lambda request, write: calls.append(request),
+    )
+    _mark_terminal(deps.ledger, rows[2])
+    before = deps.ledger.path.read_bytes()
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "new_at_top_contract_failed"
+    assert calls == []
+    assert deps.ledger.path.read_bytes() == before
 
 
 def test_check_sends_only_nonterminal_event_keys(tmp_path: Path) -> None:

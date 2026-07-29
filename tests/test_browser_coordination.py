@@ -54,6 +54,8 @@ def test_test_runtime_rejects_explicit_production_state_paths() -> None:
         SharedBrowserLease(DEFAULT_BROWSER_LOCK)
     with pytest.raises(RuntimeError, match="production shared state"):
         DailyCrunchbaseBudget(DEFAULT_CRUNCHBASE_BUDGET)
+
+
 def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> None:
     lock = tmp_path / "browser.lock"
     with SharedBrowserLease(lock):
@@ -136,6 +138,8 @@ def test_unknown_lane_is_rejected(tmp_path: Path) -> None:
             requested=1,
             lane="typo-lane",
         )
+
+
 def test_detector_can_reserve_no_more_than_two_pages_per_source(
     tmp_path: Path,
 ) -> None:
@@ -291,3 +295,66 @@ def test_invalid_or_future_ledgers_fail_closed(
         DailyCrunchbaseBudget(path).snapshot(
             datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
         )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm_crunchbase": 24},
+        },
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 26,
+            "used": 25,
+            "lanes": {"crm_crunchbase": 25},
+        },
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "not-a-date",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm_crunchbase": 25},
+        },
+    ],
+)
+def test_corrupt_prior_day_budget_fails_closed_without_rewrite(
+    tmp_path: Path,
+    payload: dict,
+) -> None:
+    """A date change must not reopen allowance before validating old state."""
+    path = tmp_path / "budget.json"
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    with pytest.raises(RuntimeError, match="shared Crunchbase budget"):
+        budget.claim(today, requested=1, lane="research-funding-watcher")
+
+    assert path.read_text(encoding="utf-8") == serialized
+
+
+def test_future_dated_budget_fails_closed_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "budget.json"
+    payload = {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-30",
+        "ceiling": 25,
+        "used": 25,
+        "lanes": {"crm_crunchbase": 25},
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    with pytest.raises(RuntimeError, match="future-dated"):
+        budget.snapshot(today)
+
+    assert path.read_text(encoding="utf-8") == serialized

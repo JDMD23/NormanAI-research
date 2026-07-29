@@ -294,13 +294,11 @@ class DailyCrunchbaseBudget:
             ) from exc
         if not isinstance(payload, dict):
             raise RuntimeError("invalid shared Crunchbase budget")
-        ledger_date = _validate_budget(payload)
-        if ledger_date > local_date:
-            raise RuntimeError(
-                "shared Crunchbase budget is future-dated"
-            )
-        if ledger_date < local_date:
+        persisted_date = _validate_budget(payload)
+        if persisted_date < local_date:
             return _new_payload(local_date.isoformat())
+        if persisted_date > local_date:
+            raise RuntimeError("future-dated shared Crunchbase budget")
         return payload
 
 
@@ -336,12 +334,15 @@ def _validate_budget(payload: dict[str, Any]) -> date:
     }
     if version_and_ceiling not in supported:
         raise RuntimeError("unsupported shared Crunchbase budget")
+    persisted_date = payload["date"]
+    if not isinstance(persisted_date, str):
+        raise RuntimeError("invalid shared Crunchbase budget values")
     try:
-        ledger_date = date.fromisoformat(payload["date"])
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "invalid shared Crunchbase budget date"
-        ) from exc
+        parsed_date = date.fromisoformat(persisted_date)
+    except ValueError as exc:
+        raise RuntimeError("invalid shared Crunchbase budget values") from exc
+    if parsed_date.isoformat() != persisted_date:
+        raise RuntimeError("invalid shared Crunchbase budget values")
     used, lanes = payload["used"], payload["lanes"]
     effective_ceiling = payload["ceiling"]
     if (
@@ -372,7 +373,7 @@ def _validate_budget(payload: dict[str, Any]) -> date:
             raise RuntimeError(
                 "invalid shared Crunchbase allocation"
             )
-    return ledger_date
+    return parsed_date
 
 
 def _require_aware(now: datetime) -> None:
