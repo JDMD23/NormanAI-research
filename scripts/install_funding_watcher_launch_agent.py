@@ -307,6 +307,18 @@ def _rollback_install(
             restored = True
     except (OSError, subprocess.SubprocessError) as exc:
         errors.append(f"plist restore failed: {type(exc).__name__}: {exc}")
+        if previous_payload is not None and previous_mode is not None:
+            try:
+                restored = (
+                    plist.read_bytes() == previous_payload
+                    and stat.S_IMODE(plist.stat().st_mode) == previous_mode
+                )
+            except OSError as verification_error:
+                errors.append(
+                    "prior plist verification failed: "
+                    f"{type(verification_error).__name__}: "
+                    f"{verification_error}"
+                )
     if reload_previous:
         if previous_payload is None:
             errors.append("prior loaded service had no restorable plist")
