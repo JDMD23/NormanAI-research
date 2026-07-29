@@ -114,6 +114,21 @@ def test_event_key_ignores_descriptive_fields_and_display_formatting() -> None:
     assert funding_event_key(first) == funding_event_key(changed)
 
 
+def test_event_key_matches_the_canonical_core_contract_fixture() -> None:
+    row = observation(
+        company="Example",
+        crunchbase_url="https://www.crunchbase.com/organization/example",
+        funding_date="2026-07-28",
+        funding_type="Series A",
+        funding_amount_raw="$10,000,000",
+        funding_amount_minor=1_000_000_000,
+        funding_currency="USD",
+    )
+    assert funding_event_key(row) == (
+        "85c24e86a3de5679ecb4ce9abd86109d47d3981f4b1407f59c0ab1097aaed6af"
+    )
+
+
 def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     tmp_path: Path,
 ) -> None:

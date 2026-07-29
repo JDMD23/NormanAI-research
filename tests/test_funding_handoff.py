@@ -11,6 +11,7 @@ import pytest
 
 from lib.crunchbase_saved_list import FundingObservation
 from lib.funding_handoff import (
+    _configured_core_path,
     build_handoff,
     invoke_crm_handoff,
     validate_result,
@@ -243,3 +244,20 @@ def test_handoff_never_serializes_environment_secrets(
     serialized = json.dumps(request_payload(observation()))
     assert "secret-notion-token" not in serialized
     assert "secret-xai-key" not in serialized
+
+
+def test_explicit_core_path_override_supports_cross_repo_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "Core CRM"
+    core.mkdir()
+    monkeypatch.setenv("NORMAN_CRM_CORE_PATH", str(core))
+    assert _configured_core_path() == core.resolve()
+
+
+def test_core_path_override_must_be_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NORMAN_CRM_CORE_PATH", "../Core CRM")
+    with pytest.raises(RuntimeError, match="absolute"):
+        _configured_core_path()

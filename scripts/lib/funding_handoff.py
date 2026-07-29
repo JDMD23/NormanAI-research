@@ -220,6 +220,12 @@ def invoke_crm_handoff(
 
 
 def _configured_core_path() -> Path:
+    override = os.environ.get("NORMAN_CRM_CORE_PATH")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise RuntimeError("NORMAN_CRM_CORE_PATH must be absolute")
+        return path.resolve()
     config = _load_json(ROOT / "config" / "research.json")
     value = (config.get("crmCore") or {}).get("path")
     if not isinstance(value, str) or not value.strip():

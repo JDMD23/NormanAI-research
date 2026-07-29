@@ -389,7 +389,8 @@ def _canonical_organization_url(value: str) -> str:
         )
     ):
         return ""
-    return f"https://www.crunchbase.com{parsed.path.casefold()}"
+    slug = parsed.path.casefold().rsplit("/", 1)[-1]
+    return f"crunchbase.com/organization/{slug}"
 
 
 def _validate_research_ledger(payload: dict[str, Any]) -> None:

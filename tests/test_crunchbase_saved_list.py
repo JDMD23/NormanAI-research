@@ -14,6 +14,7 @@ from lib.crunchbase_saved_list import (
     CrunchbaseSavedListBrowser,
     CrunchbaseSavedListDrift,
     SavedListDefinition,
+    browser_snapshot_javascript,
     load_watcher_config,
     parse_saved_list_snapshot,
     validate_saved_list_url,
@@ -143,6 +144,27 @@ def test_duplicate_filter_controls_fail_closed_even_if_one_value_matches(payload
         parse_saved_list_snapshot({**payload, "filters": controls}, SOURCE, OBSERVED_AT)
 
 
+def test_live_crunchbase_filter_control_formats_match_contract(
+    payload: dict,
+) -> None:
+    controls = [
+        {
+            "label": "Last Funding Date",
+            "operator": "after",
+            "value": "07/01/2026",
+        },
+        {
+            "label": "Last Funding Amount",
+            "operator": "greater than or equal to",
+            "value": "$5,000,000",
+        },
+    ]
+    result = parse_saved_list_snapshot(
+        {**payload, "filters": controls}, SOURCE, OBSERVED_AT
+    )
+    assert result.result_count == payload["resultCount"]
+
+
 class FakeTransport:
     def __init__(self, states: list[dict]) -> None:
         self.states, self.opened, self.reset_urls, self.closed, self.restored = list(states), [], [], [], False
@@ -229,6 +251,12 @@ def test_chrome_javascript_literal_preserves_unicode_for_applescript() -> None:
     assert "£€" in literal
     assert "\\u00a3" not in literal
     assert "\\u20ac" not in literal
+
+
+def test_browser_snapshot_reads_live_predicate_controls() -> None:
+    javascript = browser_snapshot_javascript(SOURCE)
+    assert 'document.querySelectorAll("predicate")' in javascript
+    assert 'label==="Last Funding Amount"' in javascript
 
 
 def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(monkeypatch: pytest.MonkeyPatch) -> None:
