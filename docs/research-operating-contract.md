@@ -43,6 +43,8 @@ writer or grants it Notion property authority. This is not a style preference:
 If research ever needs the CRM to change, it emits the documented CSV or typed
 funding-event JSON and invokes the matching Core CLI. It never opens a Notion
 write client here. `scripts/lib/sinks.py` has only a read-only board prefilter.
+Read-only database queries and page `GET` requests do not grant write authority
+and remain allowed.
 
 ## 3. Research qualifies; crm-core scores
 
@@ -200,7 +202,8 @@ event terminal until it has a validated durable Core result.
 ## 11. Hard forbidden
 
 - Writing Notion from this repo
-- Importing CRM Core's Notion client or calling `/v1/pages`
+- Importing CRM Core's Notion client or mutating `/v1/pages` directly through
+  an SDK page create/update or HTTP `POST`/`PATCH`
 - Writing Fit Score, Status, Top Pursuit, Priority, or any field crm-core lists
   as JD-owned
 - Emitting a candidate with no source URL

@@ -50,14 +50,17 @@ class _NotionWriteVisitor(ast.NodeVisitor):
         self.violations: list[str] = []
         self._alias_scopes: list[dict[str, str | None]] = [{}]
         self._string_scopes: list[dict[str, str | None]] = [{}]
+        self._notion_scopes: list[dict[str, bool]] = [{}]
+        self._page_callable_scopes: list[dict[str, bool]] = [{}]
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._prebind_module(node.body)
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Import(self, node: ast.Import) -> None:
         for item in node.names:
-            local = item.asname or item.name.split(".", 1)[0]
-            self._alias_scopes[-1][local] = (
-                item.name if item.asname else item.name.split(".", 1)[0]
-            )
-            self._string_scopes[-1][local] = None
+            self._bind_import(item)
             if _is_writer_symbol(item.name):
                 self._record(node, f"imports writer module {item.name}")
 
@@ -65,27 +68,22 @@ class _NotionWriteVisitor(ast.NodeVisitor):
         module = node.module or ""
         for item in node.names:
             qualified = ".".join(part for part in (module, item.name) if part)
-            local = item.asname or item.name
-            self._alias_scopes[-1][local] = qualified
-            self._string_scopes[-1][local] = None
+            self._bind_import_from(module, item)
             if _is_writer_symbol(qualified):
                 self._record(node, f"imports writer symbol {qualified}")
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
-        qualified = self._qualified_name(node.value)
-        string = self._string_pattern(node.value)
         for target in node.targets:
-            self._bind_target(target, qualified=qualified, string=string)
+            self._bind_assignment(target, node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is not None:
             self.visit(node.value)
-        self._bind_target(
-            node.target,
-            qualified=self._qualified_name(node.value) if node.value else None,
-            string=self._string_pattern(node.value),
-        )
+        if node.value is None:
+            self._invalidate_target(node.target)
+        else:
+            self._bind_assignment(node.target, node.value)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._bind_target(node, qualified=None, string=None, name=node.name)
@@ -114,6 +112,55 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             self.visit(statement)
         self._pop_scope()
 
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.iter)
+        self._invalidate_target(node.target)
+        for statement in (*node.body, *node.orelse):
+            self.visit(statement)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        self._invalidate_target(node.target)
+        for statement in (*node.body, *node.orelse):
+            self.visit(statement)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._invalidate_target(item.optional_vars)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self.visit_With(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name is not None:
+            self._bind_name(
+                node.name,
+                qualified=None,
+                string=None,
+                notion=False,
+                page_callable=False,
+            )
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, (node.key, node.value))
+
     def visit_Call(self, node: ast.Call) -> None:
         called = self._qualified_name(node.func)
         parts = called.casefold().split(".") if called else []
@@ -129,10 +176,7 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             if imported and _is_writer_symbol(imported):
                 self._record(node, f"dynamically imports writer {imported}")
 
-        if len(parts) >= 2 and parts[-2:] in (
-            ["pages", "create"],
-            ["pages", "update"],
-        ):
+        if self._is_notion_page_callable(node.func):
             self._record(node, f"calls Notion page writer {called}")
 
         method, url = self._http_operation(node, parts)
@@ -220,6 +264,14 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             ) + (
                 right if right is not None else self._UNKNOWN_STRING_PART
             )
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            return self._string_pattern(node.left)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+        ):
+            return self._string_pattern(node.func.value)
         if isinstance(node, ast.JoinedStr):
             pieces: list[str] = []
             for value in node.values:
@@ -264,6 +316,82 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             self.visit(statement)
         self._pop_scope()
 
+    def _prebind_module(self, body: list[ast.stmt]) -> None:
+        for statement in body:
+            if isinstance(statement, ast.Import):
+                for item in statement.names:
+                    self._bind_import(item)
+            elif isinstance(statement, ast.ImportFrom):
+                module = statement.module or ""
+                for item in statement.names:
+                    self._bind_import_from(module, item)
+
+        for _ in range(max(1, len(body))):
+            before = (
+                dict(self._alias_scopes[-1]),
+                dict(self._string_scopes[-1]),
+                dict(self._notion_scopes[-1]),
+                dict(self._page_callable_scopes[-1]),
+            )
+            for statement in body:
+                if isinstance(statement, ast.Assign):
+                    for target in statement.targets:
+                        self._bind_assignment(target, statement.value)
+                elif (
+                    isinstance(statement, ast.AnnAssign)
+                    and statement.value is not None
+                ):
+                    self._bind_assignment(statement.target, statement.value)
+            after = (
+                self._alias_scopes[-1],
+                self._string_scopes[-1],
+                self._notion_scopes[-1],
+                self._page_callable_scopes[-1],
+            )
+            if before == after:
+                break
+
+    def _bind_import(self, item: ast.alias) -> None:
+        local = item.asname or item.name.split(".", 1)[0]
+        qualified = item.name if item.asname else item.name.split(".", 1)[0]
+        self._bind_name(
+            local,
+            qualified=qualified,
+            string=None,
+            notion=_is_notion_sdk_symbol(item.name),
+            page_callable=False,
+        )
+
+    def _bind_import_from(self, module: str, item: ast.alias) -> None:
+        qualified = ".".join(part for part in (module, item.name) if part)
+        self._bind_name(
+            item.asname or item.name,
+            qualified=qualified,
+            string=None,
+            notion=_is_notion_sdk_symbol(qualified),
+            page_callable=False,
+        )
+
+    def _bind_assignment(self, target: ast.AST, value: ast.AST) -> None:
+        if (
+            isinstance(target, (ast.List, ast.Tuple))
+            and isinstance(value, (ast.List, ast.Tuple))
+            and len(target.elts) == len(value.elts)
+        ):
+            for target_item, value_item in zip(target.elts, value.elts):
+                self._bind_assignment(target_item, value_item)
+            return
+        if isinstance(target, (ast.List, ast.Tuple)):
+            self._invalidate_target(target)
+            return
+        self._bind_target(
+            target,
+            qualified=self._qualified_name(value),
+            string=self._string_pattern(value),
+            notion=self._is_notion_value(value),
+            page_callable=self._is_notion_page_callable(value),
+        )
+
     def _bind_arguments(self, arguments: ast.arguments) -> None:
         all_arguments = (
             *arguments.posonlyargs,
@@ -293,6 +421,8 @@ class _NotionWriteVisitor(ast.NodeVisitor):
         *,
         qualified: str | None,
         string: str | None,
+        notion: bool = False,
+        page_callable: bool = False,
         name: str | None = None,
     ) -> None:
         if name is not None:
@@ -304,6 +434,8 @@ class _NotionWriteVisitor(ast.NodeVisitor):
                 target.value,
                 qualified=qualified,
                 string=string,
+                notion=notion,
+                page_callable=page_callable,
             )
             return
         elif isinstance(target, (ast.List, ast.Tuple)):
@@ -312,13 +444,82 @@ class _NotionWriteVisitor(ast.NodeVisitor):
                     item,
                     qualified=qualified,
                     string=string,
+                    notion=notion,
+                    page_callable=page_callable,
                 )
             return
         else:
             return
         for local in names:
-            self._alias_scopes[-1][local] = qualified
-            self._string_scopes[-1][local] = string
+            self._bind_name(
+                local,
+                qualified=qualified,
+                string=string,
+                notion=notion,
+                page_callable=page_callable,
+            )
+
+    def _bind_name(
+        self,
+        name: str,
+        *,
+        qualified: str | None,
+        string: str | None,
+        notion: bool,
+        page_callable: bool,
+    ) -> None:
+        self._alias_scopes[-1][name] = qualified
+        self._string_scopes[-1][name] = string
+        self._notion_scopes[-1][name] = notion
+        self._page_callable_scopes[-1][name] = page_callable
+
+    def _invalidate_target(self, target: ast.AST) -> None:
+        self._bind_target(
+            target,
+            qualified=None,
+            string=None,
+            notion=False,
+            page_callable=False,
+        )
+
+    def _is_notion_value(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return self._lookup_bool(self._notion_scopes, node.id)
+        if isinstance(node, ast.Attribute):
+            return self._is_notion_value(node.value) or _is_notion_sdk_symbol(
+                self._qualified_name(node) or ""
+            )
+        if isinstance(node, ast.Call):
+            return self._is_notion_value(node.func) or _is_notion_sdk_symbol(
+                self._qualified_name(node.func) or ""
+            )
+        return False
+
+    def _is_notion_page_callable(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return self._lookup_bool(self._page_callable_scopes, node.id)
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"create", "update"}
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "pages"
+            and self._is_notion_value(node.value.value)
+        )
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        outputs: tuple[ast.AST, ...],
+    ) -> None:
+        self._push_scope()
+        for generator in generators:
+            self.visit(generator.iter)
+            self._invalidate_target(generator.target)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for output in outputs:
+            self.visit(output)
+        self._pop_scope()
 
     @staticmethod
     def _lookup(
@@ -330,13 +531,24 @@ class _NotionWriteVisitor(ast.NodeVisitor):
                 return scope[name]
         return None
 
+    @staticmethod
+    def _lookup_bool(scopes: list[dict[str, bool]], name: str) -> bool:
+        for scope in reversed(scopes):
+            if name in scope:
+                return scope[name]
+        return False
+
     def _push_scope(self) -> None:
         self._alias_scopes.append({})
         self._string_scopes.append({})
+        self._notion_scopes.append({})
+        self._page_callable_scopes.append({})
 
     def _pop_scope(self) -> None:
         self._alias_scopes.pop()
         self._string_scopes.pop()
+        self._notion_scopes.pop()
+        self._page_callable_scopes.pop()
 
     def _record(self, node: ast.AST, reason: str) -> None:
         self.violations.append(f"{self.label}:{node.lineno}: {reason}")
@@ -363,6 +575,19 @@ def _is_writer_symbol(qualified: str) -> bool:
         return True
     return "notion" in parts and any(
         part in {"client", "asyncclient", "writer"} for part in parts
+    )
+
+
+def _is_notion_sdk_symbol(qualified: str) -> bool:
+    parts = {
+        part.replace("-", "_").casefold()
+        for part in qualified.split(".")
+        if part
+    }
+    return bool(
+        parts.intersection(
+            {"notion", "notion_client", "notion_writer", "notionclient"}
+        )
     )
 
 
@@ -497,10 +722,38 @@ def test_research_scripts_have_no_notion_write_authority():
             "page = f'https://api.notion.com/v1/pages/{page_id}'\n"
             "requests.patch(page, json={})\n"
         ),
+        "format page-id PATCH": (
+            "import requests\n"
+            "page_id = get_page_id()\n"
+            "template = 'https://api.notion.com/v1/pages/{}'\n"
+            "requests.patch(template.format(page_id), json={})\n"
+        ),
+        "percent page-id PATCH": (
+            "import requests\n"
+            "page_id = get_page_id()\n"
+            "template = 'https://api.notion.com/v1/pages/%s'\n"
+            "requests.patch(template % page_id, json={})\n"
+        ),
+        "destructured direct page call": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send, _ = requests.patch, None\n"
+            "send(notion_url, json={})\n"
+        ),
+        "late-bound dynamic Core import": (
+            "def load_writer():\n"
+            "    load('crm_intake')\n"
+            "load = __import__\n"
+            "load_writer()\n"
+        ),
         "Notion page method call": (
+            "import notion as sdk\n"
+            "client = sdk.Client(auth='token')\n"
             "client.pages.update(page_id='page-id', properties={})\n"
         ),
         "assigned Notion page method": (
+            "import notion as sdk\n"
+            "client = sdk.Client(auth='token')\n"
             "send = client.pages.update\n"
             "send(page_id='page-id', properties={})\n"
         ),
@@ -530,6 +783,38 @@ def test_research_scripts_have_no_notion_write_authority():
         "unrelated relative pages endpoint": (
             "import requests\n"
             "requests.post('/v1/pages', json={'site': 'internal wiki'})\n"
+        ),
+        "unrelated pages object": (
+            "site.pages.create(title='documentation')\n"
+        ),
+        "for-target shadows page writer": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = requests.patch\n"
+            "for send in [safe_send]:\n"
+            "    send(notion_url)\n"
+        ),
+        "with-target shadows page writer": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = requests.patch\n"
+            "with safe_sender() as send:\n"
+            "    send(notion_url)\n"
+        ),
+        "except-target shadows page writer": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = requests.patch\n"
+            "try:\n"
+            "    raise SafeSender()\n"
+            "except SafeSender as send:\n"
+            "    send(notion_url)\n"
+        ),
+        "comprehension-target shadows page writer": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = requests.patch\n"
+            "[send(notion_url) for send in safe_senders]\n"
         ),
     }
     rejected = {
