@@ -128,6 +128,7 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = [{}]
         self._active_function_calls: set[int] = set()
+        self._function_exit_states: list[list[tuple]] = []
         self._function_module_states: list[
             tuple[
                 dict[str, str | None],
@@ -448,6 +449,7 @@ class _NotionWriteVisitor(ast.NodeVisitor):
         self._function_globals.append(global_names)
         self._function_nonlocals.append(nonlocal_names)
         self._function_effects.append(propagate_effects)
+        self._function_exit_states.append([])
         self._bind_arguments(node.args)
         for local in local_names - global_names - nonlocal_names:
             self._bind_name(
@@ -457,7 +459,14 @@ class _NotionWriteVisitor(ast.NodeVisitor):
                 notion=False,
                 page_callable=False,
             )
-        self._visit_block(node.body)
+        terminator = self._visit_block(node.body)
+        if terminator is None:
+            self._function_exit_states[-1].append(self._analysis_state())
+        if propagate_effects:
+            self._restore_function_exit_effects(
+                self._function_exit_states[-1]
+            )
+        self._function_exit_states.pop()
         self._function_effects.pop()
         self._function_nonlocals.pop()
         self._function_globals.pop()
@@ -630,6 +639,13 @@ class _NotionWriteVisitor(ast.NodeVisitor):
                 terminator = self._visit_if_statement(statement)
             else:
                 self.visit(statement)
+                if (
+                    isinstance(statement, (ast.Return, ast.Raise))
+                    and self._function_exit_states
+                ):
+                    self._function_exit_states[-1].append(
+                        self._analysis_state()
+                    )
                 terminator = (
                     statement.__class__.__name__.casefold()
                     if isinstance(
@@ -647,7 +663,14 @@ class _NotionWriteVisitor(ast.NodeVisitor):
         before = self._analysis_state()
         continuing = []
         terminators = []
-        for branch in (node.body, node.orelse):
+        if (
+            isinstance(node.test, ast.Constant)
+            and isinstance(node.test.value, bool)
+        ):
+            branches = (node.body if node.test.value else node.orelse,)
+        else:
+            branches = (node.body, node.orelse)
+        for branch in branches:
             self._restore_analysis_state(before)
             terminator = self._visit_block(branch)
             if terminator is None:
@@ -661,6 +684,37 @@ class _NotionWriteVisitor(ast.NodeVisitor):
             return None
         self._restore_analysis_state(before)
         return terminators[0] if terminators else None
+
+    def _restore_function_exit_effects(self, states: list[tuple]) -> None:
+        if not states:
+            return
+        merged = self._merge_analysis_states(states)
+        active_module = merged[0]
+        if active_module is not None and self._function_module_states:
+            current = self._function_module_states[-1]
+            for target, source in zip(current, active_module):
+                target.clear()
+                target.update(source)
+        for name in self._function_nonlocals[-1]:
+            for index in range(len(self._alias_scopes) - 2, 0, -1):
+                if any(
+                    name in scopes[index]
+                    for scopes in (
+                        self._alias_scopes,
+                        self._string_scopes,
+                        self._notion_scopes,
+                        self._page_callable_scopes,
+                    )
+                ):
+                    self._write_scope_binding(
+                        index,
+                        name,
+                        qualified=merged[1][index].get(name),
+                        string=merged[2][index].get(name),
+                        notion=merged[3][index].get(name, False),
+                        page_callable=merged[4][index].get(name, False),
+                    )
+                    break
 
     def _analysis_state(self) -> tuple[
         tuple[
@@ -1572,6 +1626,18 @@ def test_research_scripts_have_no_notion_write_authority():
             "configure()\n"
             "send(notion_url)\n"
         ),
+        "returning branch global writer survives function": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = safe\n"
+            "def configure():\n"
+            "    global send\n"
+            "    if enabled:\n"
+            "        send = requests.patch\n"
+            "        return\n"
+            "configure()\n"
+            "send(notion_url)\n"
+        ),
         "nonlocal writer survives nested return": (
             "import requests\n"
             "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
@@ -1593,6 +1659,20 @@ def test_research_scripts_have_no_notion_write_authority():
             "        nonlocal send\n"
             "        if enabled:\n"
             "            send = safe\n"
+            "    configure()\n"
+            "    send(notion_url)\n"
+            "dispatch()\n"
+        ),
+        "returning branch nonlocal writer survives nested function": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "def dispatch():\n"
+            "    send = safe\n"
+            "    def configure():\n"
+            "        nonlocal send\n"
+            "        if enabled:\n"
+            "            send = requests.patch\n"
+            "            return\n"
             "    configure()\n"
             "    send(notion_url)\n"
             "dispatch()\n"
@@ -1703,6 +1783,28 @@ def test_research_scripts_have_no_notion_write_authority():
             "def configure():\n"
             "    global send\n"
             "    send = safe\n"
+            "configure()\n"
+            "send(notion_url)\n"
+        ),
+        "literal true global safe reset": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = requests.patch\n"
+            "def configure():\n"
+            "    global send\n"
+            "    if True:\n"
+            "        send = safe\n"
+            "configure()\n"
+            "send(notion_url)\n"
+        ),
+        "literal false global writer assignment": (
+            "import requests\n"
+            "notion_url = 'https://api.notion.com/v1/pages/page-id'\n"
+            "send = safe\n"
+            "def configure():\n"
+            "    global send\n"
+            "    if False:\n"
+            "        send = requests.patch\n"
             "configure()\n"
             "send(notion_url)\n"
         ),
