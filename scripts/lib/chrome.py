@@ -81,6 +81,30 @@ def _osascript(script: str, timeout: int = 30) -> str:
     return proc.stdout.strip()
 
 
+def run_osascript(script: str, timeout: int = 60) -> str:
+    """Run one AppleScript through the guarded Chrome transport.
+
+    The strict saved-list reader uses this public boundary instead of its own
+    subprocess implementation, so all Research Chrome work has one failure
+    vocabulary and remains straightforward to fake in offline tests.
+    """
+    return _osascript(script, timeout=timeout)
+
+
+def applescript_string_literal(value: str) -> str:
+    """Return a safely quoted AppleScript string literal."""
+    return json.dumps(value)
+
+
+def ensure_chrome_running() -> None:
+    """Ensure Chrome has a usable window without navigating anywhere."""
+    run_osascript(
+        'tell application "Google Chrome"\n'
+        '  if (count of windows) = 0 then make new window\n'
+        'end tell'
+    )
+
+
 def _js(expr: str) -> str:
     """Collapse a JS payload to one line for AppleScript.
 
