@@ -390,6 +390,64 @@ def test_migration_idempotency_preserves_valid_post_migration_evolution(
 @pytest.mark.parametrize(
     "mutate",
     [
+        lambda payload: payload["events"].update(
+            {
+                hashlib.sha256(b"malformed-later-event").hexdigest(): {
+                    "state": "terminal",
+                    "outcome": "created",
+                }
+            }
+        ),
+        lambda payload: payload["bootstraps"].update(
+            {"not-a-url": []}
+        ),
+        lambda payload: payload["completedSlots"].update(
+            {"not-a-slot": "not-a-record"}
+        ),
+    ],
+    ids=[
+        "shallow-terminal-event",
+        "non-url-bootstrap-list",
+        "non-slot-string",
+    ],
+)
+def test_migration_rejects_malformed_post_migration_evolution(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    """Catches migration accepting additions the shared ledger cannot own."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger_path = research / "ledger.json"
+    payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    ledger_path.write_text(
+        json.dumps(payload, sort_keys=True), encoding="utf-8"
+    )
+    before = {
+        "sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "mtimeNs": ledger_path.stat().st_mtime_ns,
+    }
+
+    with pytest.raises(RuntimeError, match="Research funding ledger"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert {
+        "sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "mtimeNs": ledger_path.stat().st_mtime_ns,
+    } == before
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
         lambda ledger, receipt, original_key: ledger["events"][
             original_key
         ]["details"].update(company="Changed"),
