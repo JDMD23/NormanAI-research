@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
 LABEL = "com.normanai.research.crunchbase-funding-watcher"
 CORE_LABEL = "com.normanai.crm-core.crunchbase-funding-watcher"
 WATCHER_RELATIVE_PATH = Path("scripts/funding_watcher.py")
+CORE_HANDOFF_RELATIVE_PATH = Path("scripts/crm_funding_handoff.py")
 SCHEDULE = (
     {"Hour": 6, "Minute": 0},
     {"Hour": 10, "Minute": 0},
@@ -103,7 +105,11 @@ def _loaded(runner: Runner, uid: int) -> bool:
     )
 
 
-def _tracked(runner: Runner, root: Path) -> bool:
+def _tracked(
+    runner: Runner,
+    root: Path,
+    relative_path: Path,
+) -> bool:
     result = _run(
         runner,
         [
@@ -112,7 +118,7 @@ def _tracked(runner: Runner, root: Path) -> bool:
             str(root),
             "ls-files",
             "--error-unmatch",
-            WATCHER_RELATIVE_PATH.as_posix(),
+            relative_path.as_posix(),
         ],
     )
     return result.returncode == 0
@@ -132,6 +138,38 @@ def _permanent(path: Path) -> bool:
     return ".worktrees" not in path.resolve().parts
 
 
+def _path_from_selected_home(value: Any, home: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Research funding state directory is not configured")
+    if value == "~":
+        return home.resolve()
+    if value.startswith("~/"):
+        return (home / value[2:]).resolve()
+    path = Path(value)
+    if not path.is_absolute() or value.startswith("~"):
+        raise RuntimeError("Research funding state directory must be absolute")
+    return path.resolve()
+
+
+def _bootstrap_complete(ledger: FundingWatcherLedger, source_url: str) -> bool:
+    record = ledger.bootstraps.get(source_url)
+    if not isinstance(record, dict) or set(record) not in (
+        {"completedAt"},
+        {"completedAt", "migrated"},
+    ):
+        return False
+    if "migrated" in record and record["migrated"] is not True:
+        return False
+    completed_at = record.get("completedAt")
+    if not isinstance(completed_at, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _prerequisites(
     *,
     repo_root: Path,
@@ -142,7 +180,9 @@ def _prerequisites(
     watcher = root / WATCHER_RELATIVE_PATH
     if not _permanent(root):
         return False, "activation requires a permanent Research checkout"
-    if not watcher.is_file() or not _tracked(runner, root):
+    if not watcher.is_file() or not _tracked(
+        runner, root, WATCHER_RELATIVE_PATH
+    ):
         return False, "funding watcher must exist and be tracked by Git"
     paths = _paths(home)
     if paths["corePlist"].exists():
@@ -150,7 +190,9 @@ def _prerequisites(
     try:
         watcher_config = _load_object(root / "config/funding-watcher.json")
         research_config = _load_object(root / "config/research.json")
-        state = Path(watcher_config["stateDirectory"]).expanduser()
+        state = _path_from_selected_home(
+            watcher_config["stateDirectory"], home
+        )
         ledger = FundingWatcherLedger(state / "ledger.json")
         sources = watcher_config["sources"]
         if (
@@ -159,21 +201,32 @@ def _prerequisites(
             or any(
                 not isinstance(source, dict)
                 or not isinstance(source.get("url"), str)
-                or not ledger.bootstrap_complete(source["url"])
+                or not _bootstrap_complete(ledger, source["url"])
                 for source in sources
             )
         ):
             return False, "Research funding ledger is not bootstrap-complete"
-        core_value = (research_config.get("crmCore") or {}).get("path")
+        core_config = research_config.get("crmCore")
+        if not isinstance(core_config, dict):
+            return False, "permanent CRM Core path is not configured"
+        core_value = core_config.get("path")
         if not isinstance(core_value, str) or not core_value.strip():
             return False, "permanent CRM Core path is not configured"
+        if core_config.get("fundingHandoff") != (
+            CORE_HANDOFF_RELATIVE_PATH.as_posix()
+        ):
+            return False, "CRM Core funding handoff CLI path is invalid"
         core_root = Path(core_value).expanduser()
         if not core_root.is_absolute():
             core_root = root / core_root
         core_root = core_root.resolve()
         if not _permanent(core_root):
             return False, "activation requires a permanent CRM Core checkout"
-        core_script = core_root / "scripts/crm_funding_handoff.py"
+        core_script = core_root / CORE_HANDOFF_RELATIVE_PATH
+        if not core_script.is_file() or not _tracked(
+            runner, core_root, CORE_HANDOFF_RELATIVE_PATH
+        ):
+            return False, "CRM Core funding handoff CLI must be tracked by Git"
         text = core_script.read_text(encoding="utf-8")
         request_match = re.search(
             r'^REQUEST_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
