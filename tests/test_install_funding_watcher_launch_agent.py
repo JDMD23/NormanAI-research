@@ -571,6 +571,101 @@ def test_atomic_install_preserves_existing_plist_when_replace_fails(
     )
 
 
+def test_persistent_replace_error_reloads_exact_prior_plist(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o640)
+    runner = FakeRunner(loaded=True)
+    replace_calls = 0
+
+    def fail_replace(source, destination) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        assert Path(source).parent == plist.parent
+        assert Path(destination) == plist
+        raise OSError("persistent replace failure")
+
+    monkeypatch.setattr(installer.os, "replace", fail_replace)
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert error.startswith("plist installation failed: OSError")
+    assert "rollback failed" in error
+    assert "plist restore failed" in error
+    assert replace_calls == 2
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o640
+    lifecycle = [
+        call[:2]
+        for call in runner.calls
+        if call[0] == "launchctl"
+    ]
+    assert lifecycle == [
+        ["launchctl", "print"],
+        ["launchctl", "bootout"],
+        ["launchctl", "bootstrap"],
+    ]
+    assert runner.plist_observations[-1] == (
+        "bootstrap",
+        prior_payload,
+        0o640,
+    )
+
+
+def test_persistent_replace_error_does_not_reload_mismatched_plist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(prior_plist_payload())
+    plist.chmod(0o640)
+    runner = FakeRunner(loaded=True)
+    replace_calls = 0
+
+    def corrupt_then_fail(source, destination) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 1:
+            Path(destination).write_bytes(b"mismatched-plist")
+            Path(destination).chmod(0o600)
+        raise OSError("persistent replace failure")
+
+    monkeypatch.setattr(installer.os, "replace", corrupt_then_fail)
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    assert plist.read_bytes() == b"mismatched-plist"
+    assert plist.stat().st_mode & 0o777 == 0o600
+    assert replace_calls == 2
+    assert not any(
+        call[:2] == ["launchctl", "bootstrap"] for call in runner.calls
+    )
+
+
 def test_lint_failure_restores_prior_plist_mode_and_loaded_service(
     tmp_path: Path,
 ) -> None:
