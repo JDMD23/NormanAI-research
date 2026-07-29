@@ -9,6 +9,7 @@ import os
 import plistlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -248,7 +249,12 @@ def _prerequisites(
     return True, ""
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
+def _atomic_write(
+    path: Path,
+    payload: bytes,
+    *,
+    mode: int = 0o644,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
@@ -260,7 +266,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        path.chmod(0o644)
+        path.chmod(mode)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
@@ -269,6 +275,82 @@ def _atomic_write(path: Path, payload: bytes) -> None:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _remove_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _rollback_install(
+    *,
+    plist: Path,
+    previous_payload: bytes | None,
+    previous_mode: int | None,
+    reload_previous: bool,
+    runner: Runner,
+    uid: int,
+) -> list[str]:
+    errors: list[str] = []
+    restored = False
+    try:
+        if previous_payload is None:
+            _remove_file(plist)
+        elif previous_mode is None:
+            errors.append("prior plist mode was unavailable")
+        else:
+            _atomic_write(plist, previous_payload, mode=previous_mode)
+            restored = True
+    except Exception as exc:
+        errors.append(f"plist restore failed: {type(exc).__name__}: {exc}")
+    if reload_previous:
+        if previous_payload is None:
+            errors.append("prior loaded service had no restorable plist")
+        elif restored:
+            reloaded = _run(
+                runner,
+                [
+                    "launchctl",
+                    "bootstrap",
+                    f"gui/{uid}",
+                    str(plist),
+                ],
+            )
+            if reloaded.returncode:
+                errors.append("prior service reload failed")
+    return errors
+
+
+def _post_replace_failure(
+    primary: str,
+    *,
+    plist: Path,
+    previous_payload: bytes | None,
+    previous_mode: int | None,
+    reload_previous: bool,
+    runner: Runner,
+    uid: int,
+) -> int:
+    rollback_errors = _rollback_install(
+        plist=plist,
+        previous_payload=previous_payload,
+        previous_mode=previous_mode,
+        reload_previous=reload_previous,
+        runner=runner,
+        uid=uid,
+    )
+    if rollback_errors:
+        print(
+            f"{primary}; rollback failed: {'; '.join(rollback_errors)}",
+            file=sys.stderr,
+        )
+    else:
+        print(primary, file=sys.stderr)
+    return INTERNAL
 
 
 def _install(
@@ -290,8 +372,13 @@ def _install(
     payload = render_plist(
         repo_root, home, python_path, paths["stdout"], paths["stderr"]
     )
+    previous_payload: bytes | None = None
+    previous_mode: int | None = None
+    if paths["plist"].exists():
+        previous_payload = paths["plist"].read_bytes()
+        previous_mode = stat.S_IMODE(paths["plist"].stat().st_mode)
     is_loaded = _loaded(runner, uid)
-    if paths["plist"].exists() and paths["plist"].read_bytes() == payload and is_loaded:
+    if previous_payload == payload and is_loaded:
         print(f"{LABEL} is already installed and loaded")
         return OK
     if is_loaded:
@@ -310,8 +397,15 @@ def _install(
     _atomic_write(paths["plist"], payload)
     lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
     if lint.returncode:
-        print("plist validation failed", file=sys.stderr)
-        return INTERNAL
+        return _post_replace_failure(
+            "plist validation failed",
+            plist=paths["plist"],
+            previous_payload=previous_payload,
+            previous_mode=previous_mode,
+            reload_previous=is_loaded,
+            runner=runner,
+            uid=uid,
+        )
     loaded = _run(
         runner,
         [
@@ -322,8 +416,15 @@ def _install(
         ],
     )
     if loaded.returncode:
-        print("launchctl bootstrap failed", file=sys.stderr)
-        return INTERNAL
+        return _post_replace_failure(
+            "launchctl bootstrap failed",
+            plist=paths["plist"],
+            previous_payload=previous_payload,
+            previous_mode=previous_mode,
+            reload_previous=is_loaded,
+            runner=runner,
+            uid=uid,
+        )
     print(f"installed and loaded {LABEL}")
     return OK
 
