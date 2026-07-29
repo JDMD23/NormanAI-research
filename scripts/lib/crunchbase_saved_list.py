@@ -423,7 +423,7 @@ class ChromeSavedListTransport:
         if self._previous_tab is None: return
         window_id, tab_id = self._previous_tab; tab_literal = chrome.applescript_string_literal(tab_id)
         try:
-            result = self._osascript(f'tell application "Google Chrome"\n if exists tab id {tab_literal} of window id {window_id} then\n  set active tab index of window id {window_id} to index of tab id {tab_literal} of window id {window_id}\n  set index of window id {window_id} to 1\n  return "restored"\n end if\nend tell\nreturn "previous_tab_missing"')
+            result = self._osascript(f'tell application "Google Chrome"\n set tabCount to count of tabs of window id {window_id}\n repeat with candidateIndex from 1 to tabCount\n  if ((id of tab candidateIndex of window id {window_id}) as text) is {tab_literal} then\n   set active tab index of window id {window_id} to candidateIndex\n   set index of window id {window_id} to 1\n   return "restored"\n  end if\n end repeat\nend tell\nreturn "previous_tab_missing"')
             if result != "restored":
                 raise RuntimeError("previous Chrome tab no longer exists")
         finally:

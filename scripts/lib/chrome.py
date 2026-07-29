@@ -81,7 +81,9 @@ def run_osascript(script: str, timeout: int = 60) -> str:
 
 def applescript_string_literal(value: str) -> str:
     """Return a safely quoted AppleScript string literal."""
-    return json.dumps(value)
+    # AppleScript accepts literal Unicode, but does not understand JSON's
+    # ``\uXXXX`` escape syntax inside string literals.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def ensure_chrome_running() -> None:

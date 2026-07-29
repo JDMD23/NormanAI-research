@@ -222,6 +222,15 @@ def test_chrome_transport_uses_safe_chrome_helpers(monkeypatch: pytest.MonkeyPat
     assert ChromeSavedListTransport().open_dedicated_tab(SOURCE.url) == "window-10:tab-watcher-tab"
 
 
+def test_chrome_javascript_literal_preserves_unicode_for_applescript() -> None:
+    from lib import chrome
+
+    literal = chrome.applescript_string_literal("^[\\$£€][\\d,.]+$")
+    assert "£€" in literal
+    assert "\\u00a3" not in literal
+    assert "\\u20ac" not in literal
+
+
 def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     from lib import chrome
 
@@ -237,7 +246,8 @@ def test_chrome_transport_owns_a_new_temporary_tab_and_closes_it_before_restore(
     assert "make new tab at end of tabs of front window" in calls[0]
     assert "repeat with candidateWindow" not in calls[0]
     assert 'close tab id "watcher-tab" of window id 10' in calls[1]
-    assert 'tab id "user-tab" of window id 10' in calls[2]
+    assert 'is "user-tab"' in calls[2]
+    assert "repeat with candidateIndex" in calls[2]
 
 
 def test_chrome_transport_uses_stable_ids_when_tab_insertion_changes_indexes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,7 +265,8 @@ def test_chrome_transport_uses_stable_ids_when_tab_insertion_changes_indexes(mon
     transport.restore_previous_tab()
 
     assert 'close tab id "watcher-tab" of window id 10' in calls[1]
-    assert 'tab id "user-tab" of window id 10' in calls[2]
+    assert 'is "user-tab"' in calls[2]
+    assert "repeat with candidateIndex" in calls[2]
     assert "close tab 3" not in calls[1]
     assert "active tab index of window id 10 to 1" not in calls[2]
 
@@ -274,7 +285,8 @@ def test_chrome_transport_does_not_select_an_unrelated_tab_when_prior_tab_closed
     with pytest.raises(RuntimeError, match="previous Chrome tab no longer exists"):
         transport.restore_previous_tab()
 
-    assert 'tab id "user-tab" of window id 10' in calls[2]
+    assert 'is "user-tab"' in calls[2]
+    assert "repeat with candidateIndex" in calls[2]
     assert "active tab index of window id 10 to 1" not in calls[2]
 
 
