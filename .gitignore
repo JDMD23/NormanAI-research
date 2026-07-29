@@ -6,6 +6,9 @@ venv/
 .env.local
 state/
 out/
+# Explicit local funding-watcher override paths (covered by the roots above).
+state/funding-watcher/
+out/funding-handoffs/
 *.db
 .DS_Store
 .pytest_cache/

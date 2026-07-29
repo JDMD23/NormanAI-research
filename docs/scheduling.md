@@ -1,4 +1,37 @@
-# Scheduling — making it a daily scraper
+# Scheduling — Research discovery and the strict funding watcher
+
+## Strict funding watcher
+
+The Research-owned LaunchAgent label is
+`com.normanai.research.crunchbase-funding-watcher`. It runs at these local
+New York times every day:
+
+| Slot | Command |
+|---:|---|
+| 06:00, 10:00, 13:00, 16:00, 19:00 ET | `python3 scripts/funding_watcher.py check --write --yes --enforce-schedule` |
+
+Each scheduled source may reserve at most two pages. All Core and Research
+Crunchbase work shares a ceiling of 25 page reservations per New York day:
+
+- browser lease: `~/Library/Application Support/NormanAI/shared/browser.lock`
+- page budget: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
+
+State and immutable receipts live under
+`~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
+Requests/results live in its `handoffs/` subdirectory. `retryable` events remain
+open; only a validated Core terminal result closes them.
+
+The generic Crunchbase source is disabled. Broader Research browser work is
+offset to **07:15 and 14:15** so it does not collide with the strict watcher.
+
+Install only after both repos pass acceptance from merged permanent checkouts:
+
+```bash
+python3 scripts/install_funding_watcher_launch_agent.py install --yes
+python3 scripts/install_funding_watcher_launch_agent.py status
+```
+
+## Broader daily discovery
 
 One command does the whole day:
 
@@ -30,13 +63,13 @@ the same command works in CI without a separate script.
 
 ## On the Mac (the real daily run)
 
-Add one entry to the Codex scheduler registry, next to `crm-core-crunchbase`
-and the rest:
+If broader daily discovery is activated later, keep it separate from the strict
+watcher:
 
 | Job id | Schedule (ET) | argv |
 |--------|---------------|------|
-| `research-daily-am` | `30 6 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
-| `research-daily-pm` | `0 13 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+| `research-daily-am` | `15 7 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
+| `research-daily-pm` | `15 14 * * 1-5` | `python3 scripts/daily.py --write --yes --promote` |
 
 Two runs a weekday, both lanes. The morning one matters most — it lands before
 the enrichment lanes wake up. The afternoon one catches anything that broke
@@ -49,8 +82,8 @@ crm-core uses, so one file on the host serves both repos.
 Plain cron works too:
 
 ```cron
-30 6  * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
-0  13 * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
+15 7  * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
+15 14 * * 1-5  cd ~/Projects/NormanAI-research && /usr/bin/python3 scripts/daily.py --write --yes --promote >> ~/Library/Logs/norman-research.log 2>&1
 ```
 
 **Exit codes:** `0` is a clean run — including a run that found nothing.
@@ -60,10 +93,10 @@ like a quiet news day.
 
 ### Ordering against the enrichment lanes
 
-Run research **before** the enrichment lanes wake up. Intake creates rows at
-`Status=Research` with the Need-\* markers set, so Crunchbase → Careers →
-LinkedIn pick them up on their next tick. A 06:30 research run feeds the
-09:15 careers sync the same morning.
+Run broader research before the enrichment lanes wake up. Intake creates rows
+at `Status=Research` with the Need-\* markers set, so Crunchbase → Careers →
+LinkedIn pick them up on their next supervised cycle. The strict funding
+watcher has its own five slots and does not depend on the broader run.
 
 Research and the browser-driven enrichment lanes both want the one Chrome
 window. They take turns — `scripts/lib/chrome.py` holds the same kind of

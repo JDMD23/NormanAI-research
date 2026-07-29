@@ -59,53 +59,40 @@ bug from becoming a bill.
 
 ---
 
-## 2. Crunchbase saved search
+## 2. Approved Crunchbase funding list
 
-The repo ships with a generic Crunchbase discover URL as a placeholder. Your own
-saved search will be far better than anything guessable — the filters are the
-entire value of this lane.
+The strict watcher is pinned to one source; do not substitute a generic list:
 
-### Build the search
+`https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993`
 
-On `crunchbase.com`, filter for what you actually want to see. A good starting
-point for tenant rep:
+Open it in JD's Chrome and confirm it visibly says `Companies`, `NEW AT TOP`,
+funding after `2026-07-01`, and minimum amount `$5M`. The watcher fails closed
+on login walls, CAPTCHA, changed filters, incomplete pages, or result-count
+drift.
 
-- **Location** — New York, New York (or the NY metro)
-- **Announced date** — last 30 days
-- **Funding type** — Series A, Series B, Series C
-- **Sort** — most recent first
+Before the first supervised run:
 
-Then **Save** it and give it a name — `NormanAI-research` works.
-
-### Get the URL into the repo
-
-Open the saved search, copy the URL from the address bar, and paste it into
-`config/browse.json`:
-
-```jsonc
-{
-  "id": "cb_nyc_rounds",
-  "enabled": true,
-  "label": "Crunchbase — recent NYC funding rounds",
-  "url": "https://www.crunchbase.com/lists/…"   // ← paste yours here
-}
+```bash
+python3 scripts/funding_watcher.py migrate-legacy-state
+python3 scripts/funding_watcher.py check --dry-run
+python3 scripts/funding_watcher.py check --write --yes
 ```
 
-That's the only change. No code, no restart.
+Migration copies the preserved 189-event Core ledger without changing it. The
+first command is idempotent and refuses any count, source, schema, or key
+mismatch.
 
-### Two searches are better than one
+After both repositories are merged into permanent checkouts and acceptance is
+clean:
 
-The `cb_nyc_companies` entry is in the config already, disabled. A second saved
-search with different filters — a wider date range, or Seed and Series A only —
-gives the lane a second angle. Paste its URL, flip `enabled` to `true`.
+```bash
+python3 scripts/install_funding_watcher_launch_agent.py install --yes
+python3 scripts/install_funding_watcher_launch_agent.py status
+python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
+```
 
-### Why this lane exists
-
-**Discovery only.** It finds companies that are not yet on your board.
-
-Filling in funding details on companies already there stays with crm-core's
-`crm_crunchbase_agent.py`. The two never write the same field, and they take
-turns at the one Chrome window through a shared file lock.
+The installer refuses feature worktrees, a missing bootstrap, a mismatched Core
+contract, or a still-present Core watcher plist.
 
 ---
 

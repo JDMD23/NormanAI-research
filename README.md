@@ -3,9 +3,11 @@
 Discovery arm of NormanAI. Finds companies that are growing, raising, hiring in
 NYC, or under office-space pressure, and hands them to `NormanAI-crm-core`.
 
-```
-Grok x_search + web_search  →  qualify  →  dedup  →  intake CSV  →  crm_intake.py  →  Norman CRM Core
-        (this repo)                                                 (crm-core)          (Notion)
+```text
+ordinary discovery → candidate CSV ───────→ crm_intake.py ───────────────┐
+approved CB list  → typed funding event → crm_funding_handoff.py ────────┤
+                                                                          ↓
+                                                                  Norman CRM Core
 ```
 
 **Research finds and qualifies. It does not score.** Rows land at
@@ -52,7 +54,7 @@ Two things, both covered in **`docs/setup.md`**:
 1. An **xAI API key** from `console.x.ai` — *not* an X developer account, and
    not the same as a Grok subscription. `x_search` reads X on xAI's side, which
    is why no X API is needed.
-2. Your **Crunchbase saved search URL** pasted into `config/browse.json`.
+2. Access to the approved Crunchbase saved list in JD's logged-in Chrome.
 
 ```bash
 echo 'XAI_API_KEY=xai-...' >> ~/.normanai/.env   # same .env ladder as crm-core
@@ -81,9 +83,23 @@ Single lanes, when you're tuning one:
 
 ```bash
 python3 scripts/research_run.py --mode office_expansion --dry-run   # search only
-python3 scripts/research_browse.py --source cb_nyc_rounds --dry-run # browser only
+python3 scripts/research_browse.py --source substack_inbox --dry-run  # broad browser lane
 python3 scripts/daily.py --dry-run --show-rejects                   # why things were filtered
 ```
+
+The strict funding detector is separate from the generic browser run:
+
+```bash
+python3 scripts/funding_watcher.py migrate-legacy-state
+python3 scripts/funding_watcher.py check --dry-run
+python3 scripts/funding_watcher.py check --write --yes
+python3 scripts/install_funding_watcher_launch_agent.py status
+```
+
+It reads only the approved `Main Funding - July 2026` saved list, fingerprints
+each funding event, and sends a typed JSON request to CRM Core. Research never
+imports a Notion writer. A terminal Core result closes the event; a retryable
+result remains open for the next run.
 
 `--promote` invokes crm-core's `crm_intake.py` on the CSV, so companies reach
 the board with no human step. Research calls the writer rather than becoming
@@ -105,6 +121,8 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 | `scripts/research_browse.py` | Browser lanes (Crunchbase + Substack) |
 | `scripts/lib/pipeline.py` | The shared tail: qualify → dedup → emit → brief |
 | `scripts/research_probe.py` | One live call to verify the xAI request shape |
+| `scripts/funding_watcher.py` | Strict saved-list detector and CRM handoff |
+| `config/funding-watcher.json` | Exact source, five slots, caps, and state roots |
 | `scripts/lib/qualify.py` | The broad/tight rules |
 | `scripts/lib/discover.py` | Lane execution and the two prompts |
 | `scripts/lib/grok.py` | Agent Tools client (stdlib only) |
@@ -112,12 +130,15 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 
 ## Scheduling
 
-The full run needs this repo, the crm-core checkout, `NOTION_TOKEN`, and your
-logged-in Chrome — all on the Mac. One Codex registry entry:
+The strict watcher is a Research-owned LaunchAgent at **06:00, 10:00, 13:00,
+16:00, and 19:00 ET**. It is installed only from merged permanent checkouts
+after cross-repository acceptance. The broader browser run is offset to 07:15
+and 14:15.
 
-```
-research-daily   30 6 * * 1-5   python3 scripts/daily.py --write --yes --promote
-```
+The shared browser lock is
+`~/Library/Application Support/NormanAI/shared/browser.lock`; all Crunchbase
+lanes share the 25-page New York-day budget at
+`~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`.
 
 CI runs the search half twice a weekday **without** `--promote` and uploads the
 brief as an artifact — a free canary that can't touch the board.
@@ -130,6 +151,7 @@ lanes: **`docs/scheduling.md`**.
 - Research qualifies; crm-core scores. Never write Fit Score, Status, or any
   JD-owned field.
 - Never write Notion from here.
+- Funding-event writes go only through CRM Core's versioned public CLI.
 - Unknown ≠ 0.
 - No source URL, no candidate. No keyword hit, no candidate.
 - Tight modes stay tight — if one starts returning 25 companies, it isn't tight
