@@ -233,6 +233,19 @@ def test_validate_result_requires_page_id_for_write_success() -> None:
         validate_result(result, request=request)
 
 
+def test_validate_result_rejects_retryable_event_in_complete_result() -> None:
+    request = request_payload(observation())
+    result = result_payload(request)
+    result["events"][0].update(
+        state="retryable_failure",
+        reason="transient_core_failure",
+    )
+    result["events"][0].pop("pageId")
+
+    with pytest.raises(ValueError, match="terminal"):
+        validate_result(result, request=request)
+
+
 def test_invoke_uses_absolute_core_cli_and_mode_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -270,6 +283,38 @@ def test_invoke_uses_absolute_core_cli_and_mode_flags(
         str(result_path),
         "--dry-run",
     ]
+
+
+def test_zero_exit_does_not_return_complete_result_with_retryable_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "core"
+    script = core / "scripts" / "crm_funding_handoff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    request = request_payload(observation())
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    write_handoff(request_path, request)
+
+    def fake_run(command, **kwargs):
+        result = result_payload(request)
+        result["events"][0].update(
+            state="retryable_failure",
+            reason="transient_core_failure",
+        )
+        result["events"][0].pop("pageId")
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ValueError, match="terminal"):
+        invoke_crm_handoff(
+            request_path,
+            result_path,
+            write=True,
+            core_path=core,
+        )
 
 
 def test_invoke_write_uses_yes_and_nonzero_is_retryable(

@@ -25,7 +25,6 @@ TERMINAL_STATES = {
     "rejected_identity",
     "ambiguous_review",
 }
-RETRYABLE_STATES = {"retryable_failure"}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -153,8 +152,8 @@ def validate_result(
         )
         if not all(isinstance(value, str) and value for value in (key, state, reason)):
             raise ValueError("CRM event result strings must be non-empty")
-        if state not in TERMINAL_STATES | RETRYABLE_STATES:
-            raise ValueError("CRM event result state is invalid")
+        if state not in TERMINAL_STATES:
+            raise ValueError("complete CRM event result state must be terminal")
         page_id = event.get("pageId")
         if page_id is not None and (
             not isinstance(page_id, str) or not page_id.strip()
