@@ -11,11 +11,13 @@ New York times every day:
 | 06:00, 10:00, 13:00, 16:00, 19:00 ET | `python3 scripts/funding_watcher.py check --write --yes --enforce-schedule` |
 
 Each scheduled source may reserve at most two pages. All Core and Research
-Crunchbase work shares a ceiling of 40 page reservations per New York day.
-CRM Core may use up to 30, leaving ten for the five two-page watcher checks:
+Crunchbase work shares one 40-work-item ledger per New York day. The ledger
+enforces separate allocations: 30 Core company sessions and ten Research
+saved-list page checks. The five scheduled two-page watcher runs therefore
+fit exactly without Core being able to consume their allocation:
 
 - browser lease: `~/Library/Application Support/NormanAI/shared/browser.lock`
-- page budget: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
+- work-item ledger: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
 
 State and immutable receipts live under
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.

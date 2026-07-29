@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _env_file_candidates() -> list[Path]:
     """Same ladder crm-core uses: explicit override, repo-local, then host homes."""
+    if os.environ.get("NORMANAI_DISABLE_DOTENV") == "1":
+        return []
     candidates: list[Path] = []
     override = os.environ.get("NORMAN_ENV_FILE")
     if override:

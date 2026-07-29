@@ -108,6 +108,7 @@ def run_check(
                     now,
                     requested=max_pages,
                     lane="research-funding-watcher",
+                    exact=True,
                 )
                 if granted == 0:
                     return _finish(
@@ -262,6 +263,7 @@ def run_bootstrap(
                     now,
                     requested=max_pages,
                     lane="research-funding-bootstrap",
+                    exact=True,
                 )
                 if granted < max_pages:
                     return _finish(

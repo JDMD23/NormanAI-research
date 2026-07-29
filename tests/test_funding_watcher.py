@@ -15,6 +15,7 @@ from lib.crunchbase_saved_list import (
     FundingObservation,
     SavedListSnapshot,
 )
+from lib.browser_coordination import DailyCrunchbaseBudget
 from lib.funding_watcher_state import FundingWatcherLedger, funding_event_key
 from funding_watcher import WatcherDependencies, run_bootstrap, run_check
 
@@ -99,7 +100,14 @@ class FakeBudget:
         self.granted = granted
         self.claims: list[int] = []
 
-    def claim(self, now, *, requested: int, lane: str):
+    def claim(
+        self,
+        now,
+        *,
+        requested: int,
+        lane: str,
+        exact: bool = False,
+    ):
         self.claims.append(requested)
         return min(requested, self.granted)
 
@@ -116,7 +124,8 @@ def config(tmp_path: Path, *, enabled: bool = True) -> dict:
         "scheduledMaxPagesPerSource": 2,
         "bootstrapMaxPagesPerSource": 6,
         "bootstrapSeedTop": 10,
-        "dailyPageLoadCeiling": 40,
+        "sharedWorkItemCeiling": 40,
+        "researchDailyCheckLimit": 10,
         "stateDirectory": str(tmp_path / "state"),
         "legacyStateDirectory": str(tmp_path / "legacy"),
         "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
@@ -213,6 +222,61 @@ def test_second_successful_run_in_same_slot_does_no_work(tmp_path: Path) -> None
     assert first["status"] == "complete"
     assert second["status"] == "already_checked_slot"
     assert len(browser.calls) == 1
+
+
+def test_research_watcher_cannot_exceed_ten_daily_checks(
+    tmp_path: Path,
+) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "shared-budget.json")
+    browser = FakeBrowser([])
+    deps = dependencies(tmp_path, browser, budget=budget)
+
+    receipts = [
+        run_check(
+            config(tmp_path),
+            deps,
+            write=True,
+            now=NOW,
+            enforce_schedule=False,
+        )
+        for _ in range(6)
+    ]
+
+    assert [receipt["status"] for receipt in receipts[:5]] == [
+        "complete"
+    ] * 5
+    assert receipts[5]["status"] == "budget_exhausted"
+    assert browser.calls == [2] * 5
+
+
+def test_bootstrap_refuses_partial_capacity_without_consuming_it(
+    tmp_path: Path,
+) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "shared-budget.json")
+    assert budget.claim(
+        NOW, requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.claim(
+        NOW, requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.claim(
+        NOW, requested=1, lane="research-funding-watcher"
+    ) == 1
+    browser = FakeBrowser([observation()])
+    deps = dependencies(tmp_path, browser, budget=budget)
+
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=True,
+        now=NOW,
+    )
+
+    assert receipt["status"] == "budget_exhausted"
+    assert receipt["pagesReserved"] == 0
+    assert browser.calls == []
+    assert budget.snapshot(NOW)["used"] == 5
 
 
 def test_busy_and_budget_exhausted_are_distinct_retryable_receipts(
