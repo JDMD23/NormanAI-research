@@ -25,6 +25,7 @@ from lib.browser_coordination import (  # noqa: E402
     DailyCrunchbaseBudget,
     SharedBrowserLease,
 )
+from lib.chrome import applescript_string_literal  # noqa: E402
 from lib.crunchbase_saved_list import (  # noqa: E402
     CrunchbaseSavedListBlocked,
     CrunchbaseSavedListBrowser,
@@ -55,6 +56,7 @@ CONFIG_ERROR_STATUSES = {
     "auth_wall",
     "source_drift",
     "result_schema_mismatch",
+    "budget_state_invalid",
 }
 TERMINAL_CORE_STATES = {
     "created",
@@ -105,11 +107,23 @@ def run_check(
         snapshots = []
         try:
             for source in config["sourceDefinitions"]:
-                granted = dependencies.budget.claim(
-                    now,
-                    requested=max_pages,
-                    lane="research-funding-watcher",
-                )
+                try:
+                    granted = dependencies.budget.claim(
+                        now,
+                        requested=max_pages,
+                        lane="research-funding-watcher",
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    receipt["error"] = {
+                        "reason": type(exc).__name__,
+                        "evidence": str(exc)[:500],
+                    }
+                    return _finish(
+                        state_root,
+                        receipt,
+                        "budget_state_invalid",
+                        "budget_contract_failed",
+                    )
                 if granted == 0:
                     return _finish(
                         state_root, receipt, "budget_exhausted", "no_page_budget"
@@ -299,11 +313,23 @@ def run_bootstrap(
         snapshots = []
         try:
             for source in sources:
-                granted = dependencies.budget.claim(
-                    now,
-                    requested=max_pages,
-                    lane="research-funding-bootstrap",
-                )
+                try:
+                    granted = dependencies.budget.claim(
+                        now,
+                        requested=max_pages,
+                        lane="research-funding-bootstrap",
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    receipt["error"] = {
+                        "reason": type(exc).__name__,
+                        "evidence": str(exc)[:500],
+                    }
+                    return _finish(
+                        state_root,
+                        receipt,
+                        "budget_state_invalid",
+                        "budget_contract_failed",
+                    )
                 if granted < max_pages:
                     return _finish(
                         state_root,
@@ -643,18 +669,25 @@ def _notification(items: list[str]) -> None:
     if not items:
         return
     body = "\n".join(items[:10])
-    subprocess.run(
-        [
-            "osascript",
-            "-e",
-            f'display notification {json.dumps(body)} with title '
-            f'{json.dumps("Norman funding watcher")}',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                "display notification "
+                f"{applescript_string_literal(body)} with title "
+                f"{applescript_string_literal('Norman funding watcher')}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Notification is best-effort and runs only after terminal state and
+        # the final latest receipt are durable. A transport failure must not
+        # turn a completed event into retryable duplicate work.
+        return
 
 
 def _production_dependencies(config: dict[str, Any]) -> WatcherDependencies:

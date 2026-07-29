@@ -357,7 +357,18 @@ def migrate_legacy_state(
             raise RuntimeError("Research migration state does not match legacy")
         return receipt
 
-    research_root.mkdir(parents=True, exist_ok=False)
+    if research_root.exists():
+        raise RuntimeError(
+            "Research migration state directory exists without complete "
+            "migration artifacts"
+        )
+    try:
+        research_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "Research migration state directory exists without complete "
+            "migration artifacts"
+        ) from exc
     try:
         _atomic_write_json(ledger_path, new_payload)
         _atomic_write_json(receipt_path, receipt)

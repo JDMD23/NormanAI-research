@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -756,6 +757,117 @@ def test_latest_receipt_is_durable_before_notification(tmp_path: Path) -> None:
     )["status"] == "complete"
 
 
+def test_notification_preserves_literal_unicode_and_escapes_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(command: list[str], **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funding_watcher.subprocess, "run", fake_run)
+    company = 'München — "AI" \\ Labs\nend tell & do shell script "false"'
+    profile = "https://www.crunchbase.com/organization/münchen-ai"
+
+    funding_watcher._notification([f"{company} — {profile}"])
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:2] == ["osascript", "-e"]
+    script = command[2]
+    assert "München —" in script
+    assert "münchen-ai" in script
+    assert "\\u00" not in script
+    assert '\\"AI\\"' in script
+    assert '\\"false\\"' in script
+    assert "\\nend tell" in script
+    assert kwargs == {
+        "capture_output": True,
+        "text": True,
+        "timeout": 15,
+        "check": False,
+    }
+
+
+def test_notification_transport_failure_does_not_reopen_terminal_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = observation()
+    deps = dependencies(tmp_path, FakeBrowser([row]))
+    deps.notify = funding_watcher._notification
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("osascript", 15)
+
+    monkeypatch.setattr(funding_watcher.subprocess, "run", timeout)
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    key = funding_event_key(row)
+    assert receipt["status"] == "complete"
+    assert deps.ledger.is_terminal(key)
+    assert json.loads(
+        (deps.ledger.path.parent / "latest.json").read_text(encoding="utf-8")
+    )["status"] == "complete"
+
+
+@pytest.mark.parametrize("action", ["check", "bootstrap"])
+def test_corrupt_budget_is_schema_failure_before_browser(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    budget_path = tmp_path / "shared-budget.json"
+    budget_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "wrong",
+                "date": "2026-07-29",
+                "ceiling": 25,
+                "used": 0,
+                "lanes": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    browser = FakeBrowser([observation()])
+    deps = dependencies(
+        tmp_path,
+        browser,
+        budget=DailyCrunchbaseBudget(budget_path),
+    )
+
+    if action == "check":
+        receipt = run_check(
+            config(tmp_path),
+            deps,
+            write=True,
+            now=NOW,
+            enforce_schedule=False,
+        )
+    else:
+        receipt = run_bootstrap(
+            config(tmp_path),
+            deps,
+            seed_top=10,
+            write=True,
+            now=NOW,
+        )
+
+    assert receipt["status"] == "budget_state_invalid"
+    assert receipt["stopReason"] == "budget_contract_failed"
+    assert receipt["error"]["reason"] == "RuntimeError"
+    assert "budget" in receipt["error"]["evidence"].casefold()
+    assert funding_watcher._exit_code(receipt) == 78
+    assert browser.calls == []
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
@@ -772,6 +884,7 @@ def test_latest_receipt_is_durable_before_notification(tmp_path: Path) -> None:
         ("auth_wall", 78),
         ("source_drift", 78),
         ("result_schema_mismatch", 78),
+        ("budget_state_invalid", 78),
     ],
 )
 def test_cli_exit_contract(
@@ -861,3 +974,66 @@ def test_migration_schema_failure_exits_78_without_runtime_dependencies(
 
     assert funding_watcher.main(["migrate-legacy-state"]) == 78
     assert touched == []
+
+
+def test_partial_research_migration_directory_exits_78(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    research.mkdir()
+    marker = research / "operator-note.txt"
+    marker.write_text("preserve\n", encoding="utf-8")
+    states = ["created"] * 10 + ["baseline"] * 179
+    events = {
+        hashlib.sha256(f"event-{index}".encode()).hexdigest(): {
+            "state": state,
+            "observed_at": "2026-07-29T12:06:04+00:00",
+            "details": {
+                "company": f"Company {index}",
+                "crunchbase_url": (
+                    "https://www.crunchbase.com/organization/"
+                    f"company-{index}"
+                ),
+                "source_url": SOURCE,
+                **(
+                    {"page_id": f"page-{index}"}
+                    if state == "created"
+                    else {}
+                ),
+            },
+        }
+        for index, state in enumerate(states)
+    }
+    (legacy / "ledger.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": (
+                    "norman.crm_core.crunchbase_funding_ledger.v1"
+                ),
+                "events": events,
+                "bootstraps": {
+                    SOURCE: {
+                        "completed_at": "2026-07-29T12:06:04+00:00"
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        funding_watcher,
+        "load_watcher_config",
+        lambda path: {
+            "sourceDefinitions": [SimpleNamespace(url=SOURCE)],
+            "legacyStateDirectory": str(legacy),
+            "stateDirectory": str(research),
+        },
+    )
+
+    assert funding_watcher.main(["migrate-legacy-state"]) == 78
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+    assert not (research / "ledger.json").exists()
+    assert not (research / "migration-receipt.json").exists()
