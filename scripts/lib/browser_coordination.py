@@ -97,9 +97,27 @@ class DailyCrunchbaseBudget:
             raise ValueError("funding watcher may reserve at most 2 pages")
         with self._locked():
             payload = self._payload_for(now)
-            granted = min(requested, self.ceiling - payload["used"])
+            accounting_lane = lane
+            lane_remaining = self.ceiling
+            if lane == WATCHER_LANE:
+                slot = now.astimezone(NEW_YORK).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                accounting_lane = f"{lane}@{slot.isoformat()}"
+                lane_used = (
+                    payload["lanes"].get(lane, 0)
+                    + payload["lanes"].get(accounting_lane, 0)
+                )
+                lane_remaining = max(0, 2 - lane_used)
+            granted = min(
+                requested,
+                self.ceiling - payload["used"],
+                lane_remaining,
+            )
             payload["used"] += granted
-            payload["lanes"][lane] = payload["lanes"].get(lane, 0) + granted
+            payload["lanes"][accounting_lane] = (
+                payload["lanes"].get(accounting_lane, 0) + granted
+            )
             _atomic_write_json(self.path, payload)
             return granted
 

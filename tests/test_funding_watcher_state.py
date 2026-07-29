@@ -129,6 +129,16 @@ def test_event_key_matches_the_canonical_core_contract_fixture() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "funding_date",
+    ["2026-7-9", "2026-07-9", "2026-7-09"],
+)
+def test_event_key_rejects_noncanonical_iso_dates(funding_date: str) -> None:
+    """Catches relaxed date text producing a different hash for the same day."""
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        funding_event_key(observation(funding_date=funding_date))
+
+
 def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     tmp_path: Path,
 ) -> None:
@@ -163,6 +173,59 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
         ledger.mark_retryable(
             event_key, reason="late", observed_at="2026-07-29T14:05:00+00:00"
         )
+
+
+def test_nonbaseline_terminal_outcomes_require_handoff_pending(
+    tmp_path: Path,
+) -> None:
+    """Catches observed/retryable events bypassing the CRM handoff boundary."""
+    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    observed_key = hashlib.sha256(b"observed-direct-terminal").hexdigest()
+    retryable_key = hashlib.sha256(b"retryable-direct-terminal").hexdigest()
+
+    ledger.observe(observed_key, observed_at="2026-07-29T14:00:00+00:00")
+    with pytest.raises(ValueError, match="handoff_pending"):
+        ledger.mark_terminal(
+            observed_key,
+            outcome="created",
+            page_id="page-observed",
+            observed_at="2026-07-29T14:01:00+00:00",
+        )
+
+    ledger.observe(retryable_key, observed_at="2026-07-29T14:00:00+00:00")
+    ledger.mark_handoff_pending(
+        retryable_key,
+        run_id="run-1",
+        observed_at="2026-07-29T14:01:00+00:00",
+    )
+    ledger.mark_retryable(
+        retryable_key,
+        reason="timeout",
+        observed_at="2026-07-29T14:02:00+00:00",
+    )
+    with pytest.raises(ValueError, match="handoff_pending"):
+        ledger.mark_terminal(
+            retryable_key,
+            outcome="created",
+            page_id="page-retryable",
+            observed_at="2026-07-29T14:03:00+00:00",
+        )
+
+
+def test_baseline_terminal_allows_the_explicit_observed_bootstrap_path(
+    tmp_path: Path,
+) -> None:
+    """Protects bootstrap baselining while tightening handoff outcomes."""
+    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    event_key = hashlib.sha256(b"bootstrap-baseline").hexdigest()
+    ledger.observe(event_key, observed_at="2026-07-29T14:00:00+00:00")
+    ledger.mark_terminal(
+        event_key,
+        outcome="baseline",
+        page_id=None,
+        observed_at="2026-07-29T14:01:00+00:00",
+    )
+    assert ledger.is_terminal(event_key)
 
 
 def test_invalid_lifecycle_transition_is_rejected(tmp_path: Path) -> None:

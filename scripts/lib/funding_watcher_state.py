@@ -41,10 +41,13 @@ def funding_event_key(observation: FundingObservation) -> str:
     organization_url = _canonical_organization_url(observation.crunchbase_url)
     if not organization_url:
         raise ValueError("funding event requires canonical Crunchbase identity")
+    funding_date = observation.funding_date
     try:
-        datetime.strptime(observation.funding_date, "%Y-%m-%d")
+        parsed_date = datetime.strptime(funding_date, "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
         raise ValueError("funding event date must be YYYY-MM-DD") from exc
+    if parsed_date.strftime("%Y-%m-%d") != funding_date:
+        raise ValueError("funding event date must be YYYY-MM-DD")
     amount = observation.funding_amount_minor
     if (
         not isinstance(amount, int)
@@ -61,7 +64,7 @@ def funding_event_key(observation: FundingObservation) -> str:
     identity = {
         "source_url": source_url,
         "crunchbase_url": organization_url,
-        "funding_date": observation.funding_date,
+        "funding_date": funding_date,
         "funding_type": funding_type,
         "funding_amount_minor": amount,
         "funding_currency": currency,
@@ -147,14 +150,11 @@ class FundingWatcherLedger:
         observed_at: str,
     ) -> None:
         record = self._record(event_key)
-        if record["state"] not in {
-            "observed",
-            "handoff_pending",
-            "retryable",
-        }:
-            raise ValueError("terminal requires an observed event")
         if outcome not in TERMINAL_OUTCOMES:
             raise ValueError("unsupported terminal outcome")
+        required_state = "observed" if outcome == "baseline" else "handoff_pending"
+        if record["state"] != required_state:
+            raise ValueError(f"{outcome} terminal requires {required_state}")
         record.update(
             state="terminal",
             outcome=outcome,

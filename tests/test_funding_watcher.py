@@ -352,6 +352,9 @@ def test_imported_terminal_events_are_not_replayed(tmp_path: Path) -> None:
     for row in rows:
         key = funding_event_key(row)
         deps.ledger.observe(key, observed_at=row.observed_at)
+        deps.ledger.mark_handoff_pending(
+            key, run_id="imported", observed_at=row.observed_at
+        )
         deps.ledger.mark_terminal(
             key,
             outcome="created",
@@ -421,6 +424,9 @@ def test_bootstrap_resumes_after_top_ten_were_terminal_before_baseline(
     for row in rows[:10]:
         key = funding_event_key(row)
         deps.ledger.observe(key, observed_at=row.observed_at)
+        deps.ledger.mark_handoff_pending(
+            key, run_id="bootstrap-resume", observed_at=row.observed_at
+        )
         deps.ledger.mark_terminal(
             key,
             outcome="created",
