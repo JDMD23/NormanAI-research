@@ -31,6 +31,14 @@ def _claim(args: tuple[str, str]) -> int:
     )
 
 
+def _claim_watcher_slot(path: str) -> int:
+    return DailyCrunchbaseBudget(Path(path)).claim(
+        datetime(2026, 7, 29, 10, 30, tzinfo=NEW_YORK),
+        requested=2,
+        lane="research-funding-watcher",
+    )
+
+
 def test_default_shared_paths_resolve_from_injected_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -46,8 +54,6 @@ def test_test_runtime_rejects_explicit_production_state_paths() -> None:
         SharedBrowserLease(DEFAULT_BROWSER_LOCK)
     with pytest.raises(RuntimeError, match="production shared state"):
         DailyCrunchbaseBudget(DEFAULT_CRUNCHBASE_BUDGET)
-
-
 def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> None:
     lock = tmp_path / "browser.lock"
     with SharedBrowserLease(lock):
@@ -130,8 +136,6 @@ def test_unknown_lane_is_rejected(tmp_path: Path) -> None:
             requested=1,
             lane="typo-lane",
         )
-
-
 def test_detector_can_reserve_no_more_than_two_pages_per_source(
     tmp_path: Path,
 ) -> None:
@@ -161,6 +165,33 @@ def test_exact_claim_never_partially_consumes_remaining_capacity(
         exact=True,
     ) == 0
     assert budget.snapshot(now)["used"] == 9
+
+
+def test_detector_reservations_are_capped_per_new_york_slot_across_processes(
+    tmp_path: Path,
+) -> None:
+    """Catches repeated claims accumulating beyond two pages in one slot."""
+    path = tmp_path / "budget.json"
+    context = multiprocessing.get_context("fork")
+    with context.Pool(4) as pool:
+        grants = [
+            result.get(timeout=10)
+            for result in [
+                pool.apply_async(_claim_watcher_slot, (str(path),))
+                for _ in range(4)
+            ]
+        ]
+
+    budget = DailyCrunchbaseBudget(path)
+    next_slot = datetime(2026, 7, 29, 13, 5, tzinfo=NEW_YORK)
+    assert sum(grants) == 2
+    assert budget.claim(
+        next_slot, requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.snapshot(next_slot)["lanes"] == {
+        "research-funding-watcher@2026-07-29T10:00:00-04:00": 2,
+        "research-funding-watcher@2026-07-29T13:00:00-04:00": 2,
+    }
 
 
 def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:

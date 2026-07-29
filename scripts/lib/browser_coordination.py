@@ -151,20 +151,33 @@ class DailyCrunchbaseBudget:
             )
         with self._locked():
             payload = self._payload_for(now)
+            accounting_lane = lane
+            lane_remaining = payload["ceiling"]
+            if lane == WATCHER_LANE:
+                slot = now.astimezone(NEW_YORK).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                accounting_lane = f"{lane}@{slot.isoformat()}"
+                lane_used = (
+                    payload["lanes"].get(lane, 0)
+                    + payload["lanes"].get(accounting_lane, 0)
+                )
+                lane_remaining = max(0, 2 - lane_used)
             available = payload["ceiling"] - payload["used"]
             if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
                 available = min(
                     available,
                     GROUP_LIMITS[group] - _group_used(payload, group),
                 )
+            available = min(available, lane_remaining)
             granted = (
                 0
                 if exact and available < requested
                 else min(requested, available)
             )
             payload["used"] += granted
-            payload["lanes"][lane] = (
-                payload["lanes"].get(lane, 0) + granted
+            payload["lanes"][accounting_lane] = (
+                payload["lanes"].get(accounting_lane, 0) + granted
             )
             _atomic_write_json(self.path, payload)
             return granted
@@ -350,7 +363,7 @@ def _validate_budget(payload: dict[str, Any]) -> date:
     ):
         raise RuntimeError("invalid shared Crunchbase budget values")
     if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
-        if any(name not in LANE_GROUPS for name in lanes):
+        if any(_lane_group(name) is None for name in lanes):
             raise RuntimeError("invalid shared Crunchbase lane")
         if any(
             _group_used(payload, group) > limit
@@ -383,17 +396,23 @@ def _require_requested(requested: int) -> None:
 def _require_lane(lane: str) -> str:
     if not isinstance(lane, str) or not lane.strip():
         raise ValueError("lane must be a non-empty string")
-    group = LANE_GROUPS.get(lane)
+    group = _lane_group(lane)
     if group is None:
         raise ValueError(f"unapproved Crunchbase lane: {lane}")
     return group
+
+
+def _lane_group(lane: str) -> str | None:
+    if lane.startswith(f"{WATCHER_LANE}@"):
+        return "research"
+    return LANE_GROUPS.get(lane)
 
 
 def _group_used(payload: dict[str, Any], group: str) -> int:
     return sum(
         amount
         for lane, amount in payload["lanes"].items()
-        if LANE_GROUPS.get(lane) == group
+        if _lane_group(lane) == group
     )
 
 
