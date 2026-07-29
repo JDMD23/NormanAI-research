@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,6 +42,23 @@ def test_default_shared_paths_match_the_cross_repository_contract() -> None:
     root = Path.home() / "Library/Application Support/NormanAI/shared"
     assert DEFAULT_BROWSER_LOCK == root / "browser.lock"
     assert DEFAULT_CRUNCHBASE_BUDGET == root / "crunchbase-budget.json"
+
+
+def test_default_shared_paths_resolve_from_injected_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NORMANAI_SHARED_STATE_DIR", str(tmp_path))
+
+    assert SharedBrowserLease().path == tmp_path / "browser.lock"
+    assert DailyCrunchbaseBudget().path == tmp_path / "crunchbase-budget.json"
+
+
+def test_test_runtime_rejects_explicit_production_state_paths() -> None:
+    with pytest.raises(RuntimeError, match="production shared state"):
+        SharedBrowserLease(DEFAULT_BROWSER_LOCK)
+    with pytest.raises(RuntimeError, match="production shared state"):
+        DailyCrunchbaseBudget(DEFAULT_CRUNCHBASE_BUDGET)
 
 
 def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> None:
@@ -148,12 +164,46 @@ def test_detector_reservations_are_capped_per_new_york_slot_across_processes(
     }
 
 
+def test_exact_claim_never_partially_consumes_remaining_capacity(
+    tmp_path: Path,
+) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
+    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+    assert budget.claim(now, requested=24, lane="core-fill") == 24
+
+    assert budget.claim(
+        now,
+        requested=2,
+        lane="research-funding-watcher",
+        exact=True,
+    ) == 0
+    assert budget.snapshot(now)["used"] == 24
+
+
+def test_exact_flag_must_be_boolean(tmp_path: Path) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
+
+    with pytest.raises(ValueError, match="exact must be boolean"):
+        budget.claim(
+            datetime(2026, 7, 29, 10, tzinfo=NEW_YORK),
+            requested=1,
+            lane="research-funding-watcher",
+            exact=1,
+        )
+
+
 def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
     budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
     first = datetime(2026, 7, 29, 23, 59, tzinfo=NEW_YORK)
     second = datetime(2026, 7, 30, 0, 1, tzinfo=NEW_YORK)
     assert budget.claim(first, requested=2, lane="research-funding-watcher") == 2
-    assert budget.snapshot(second)["used"] == 0
+    assert budget.snapshot(second) == {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-30",
+        "ceiling": 25,
+        "used": 0,
+        "lanes": {},
+    }
 
 
 @pytest.mark.parametrize(

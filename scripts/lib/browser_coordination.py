@@ -13,17 +13,38 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 
-DEFAULT_BROWSER_LOCK = (
-    Path.home() / "Library/Application Support/NormanAI/shared/browser.lock"
+_PRODUCTION_SHARED_ROOT = (
+    Path.home() / "Library/Application Support/NormanAI/shared"
 )
+DEFAULT_BROWSER_LOCK = _PRODUCTION_SHARED_ROOT / "browser.lock"
 DEFAULT_CRUNCHBASE_BUDGET = (
-    Path.home()
-    / "Library/Application Support/NormanAI/shared/crunchbase-budget.json"
+    _PRODUCTION_SHARED_ROOT / "crunchbase-budget.json"
 )
 BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v1"
 APPROVED_CEILING = 25
 WATCHER_LANE = "research-funding-watcher"
 NEW_YORK = ZoneInfo("America/New_York")
+SHARED_STATE_ENV = "NORMANAI_SHARED_STATE_DIR"
+
+
+def shared_state_root() -> Path:
+    configured = os.environ.get(SHARED_STATE_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return _PRODUCTION_SHARED_ROOT
+
+
+def _guard_test_state_path(path: Path) -> Path:
+    candidate = path.expanduser()
+    if os.environ.get("NORMANAI_TEST_MODE") != "1":
+        return candidate
+    try:
+        candidate.resolve().relative_to(_PRODUCTION_SHARED_ROOT.resolve())
+    except ValueError:
+        return candidate
+    raise RuntimeError(
+        "tests may not use the production shared state directory"
+    )
 
 
 class BrowserLeaseUnavailable(RuntimeError):
@@ -33,8 +54,10 @@ class BrowserLeaseUnavailable(RuntimeError):
 class SharedBrowserLease:
     """Non-blocking process-wide lease shared by Core and Research."""
 
-    def __init__(self, path: Path = DEFAULT_BROWSER_LOCK):
-        self.path = path
+    def __init__(self, path: Path | None = None):
+        self.path = _guard_test_state_path(
+            path if path is not None else shared_state_root() / "browser.lock"
+        )
         self._fd: int | None = None
 
     def __enter__(self) -> "SharedBrowserLease":
@@ -70,7 +93,7 @@ class DailyCrunchbaseBudget:
 
     def __init__(
         self,
-        path: Path = DEFAULT_CRUNCHBASE_BUDGET,
+        path: Path | None = None,
         ceiling: int = APPROVED_CEILING,
     ):
         if (
@@ -79,20 +102,28 @@ class DailyCrunchbaseBudget:
             or ceiling != APPROVED_CEILING
         ):
             raise ValueError("Crunchbase budget ceiling must equal 25")
-        self.path = path
+        self.path = _guard_test_state_path(
+            path
+            if path is not None
+            else shared_state_root() / "crunchbase-budget.json"
+        )
         self.ceiling = ceiling
-        self.lock_path = path.with_name("crunchbase-budget.lock")
+        self.lock_path = self.path.with_name("crunchbase-budget.lock")
 
-    def claim(self, now: datetime, *, requested: int, lane: str) -> int:
+    def claim(
+        self,
+        now: datetime,
+        *,
+        requested: int,
+        lane: str,
+        exact: bool = False,
+    ) -> int:
         _require_aware(now)
-        if (
-            not isinstance(requested, int)
-            or isinstance(requested, bool)
-            or requested < 0
-        ):
-            raise ValueError("requested must be a non-negative integer")
+        _require_requested(requested)
         if not isinstance(lane, str) or not lane.strip():
             raise ValueError("lane must be a non-empty string")
+        if not isinstance(exact, bool):
+            raise ValueError("exact must be boolean")
         if lane == WATCHER_LANE and requested > 2:
             raise ValueError("funding watcher may reserve at most 2 pages")
         with self._locked():
@@ -109,10 +140,14 @@ class DailyCrunchbaseBudget:
                     + payload["lanes"].get(accounting_lane, 0)
                 )
                 lane_remaining = max(0, 2 - lane_used)
-            granted = min(
-                requested,
+            available = min(
                 self.ceiling - payload["used"],
                 lane_remaining,
+            )
+            granted = (
+                0
+                if exact and available < requested
+                else min(requested, available)
             )
             payload["used"] += granted
             payload["lanes"][accounting_lane] = (
@@ -159,10 +194,10 @@ class DailyCrunchbaseBudget:
         return payload
 
 
-def _new_payload(date: str) -> dict[str, Any]:
+def _new_payload(ledger_date: str) -> dict[str, Any]:
     return {
         "schemaVersion": BUDGET_SCHEMA_VERSION,
-        "date": date,
+        "date": ledger_date,
         "ceiling": APPROVED_CEILING,
         "used": 0,
         "lanes": {},
@@ -209,6 +244,15 @@ def _validate_budget(payload: dict[str, Any]) -> date:
 def _require_aware(now: datetime) -> None:
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("datetime must be timezone-aware")
+
+
+def _require_requested(requested: int) -> None:
+    if (
+        not isinstance(requested, int)
+        or isinstance(requested, bool)
+        or requested < 0
+    ):
+        raise ValueError("requested must be a non-negative integer")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

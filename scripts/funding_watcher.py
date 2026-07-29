@@ -112,6 +112,7 @@ def run_check(
                         now,
                         requested=max_pages,
                         lane="research-funding-watcher",
+                        exact=True,
                     )
                 except (ValueError, RuntimeError) as exc:
                     receipt["error"] = {
@@ -355,6 +356,7 @@ def run_bootstrap(
                         now,
                         requested=max_pages,
                         lane="research-funding-bootstrap",
+                        exact=True,
                     )
                 except (ValueError, RuntimeError) as exc:
                     receipt["error"] = {

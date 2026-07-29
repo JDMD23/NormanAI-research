@@ -10,8 +10,9 @@ New York times every day:
 |---:|---|
 | 06:00, 10:00, 13:00, 16:00, 19:00 ET | `python3 scripts/funding_watcher.py check --write --yes --enforce-schedule` |
 
-Each scheduled source may reserve at most two pages. All Core and Research
-Crunchbase work shares a ceiling of 25 page reservations per New York day:
+Each scheduled source reserves exactly two pages or stops before browser
+access. All Core and Research Crunchbase work shares one ceiling of 25 page
+reservations per New York day:
 
 - browser lease: `~/Library/Application Support/NormanAI/shared/browser.lock`
 - page budget: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`

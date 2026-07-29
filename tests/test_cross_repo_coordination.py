@@ -137,6 +137,12 @@ raise SystemExit(handoff.main(sys.argv[1:]))
 def _isolated_env(home: Path) -> dict[str, str]:
     home.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    for key in (
+        "NORMANAI_SHARED_STATE_DIR",
+        "NORMANAI_TEST_MODE",
+        "NORMANAI_DISABLE_DOTENV",
+    ):
+        env.pop(key, None)
     env["HOME"] = str(home)
     return env
 
