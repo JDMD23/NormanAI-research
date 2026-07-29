@@ -138,7 +138,8 @@ and 14:15.
 The shared browser lock is
 `~/Library/Application Support/NormanAI/shared/browser.lock`; all Crunchbase
 lanes share the 25-page New York-day budget at
-`~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`.
+`~/Library/Application Support/NormanAI/shared/crunchbase-budget.json` with a
+40-page New York-day ceiling (30 Core CRM + ten funding watcher).
 
 CI runs the search half twice a weekday **without** `--promote` and uploads the
 brief as an artifact — a free canary that can't touch the board.

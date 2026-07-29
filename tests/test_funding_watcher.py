@@ -116,7 +116,7 @@ def config(tmp_path: Path, *, enabled: bool = True) -> dict:
         "scheduledMaxPagesPerSource": 2,
         "bootstrapMaxPagesPerSource": 6,
         "bootstrapSeedTop": 10,
-        "dailyPageLoadCeiling": 25,
+        "dailyPageLoadCeiling": 40,
         "stateDirectory": str(tmp_path / "state"),
         "legacyStateDirectory": str(tmp_path / "legacy"),
         "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",

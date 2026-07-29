@@ -20,8 +20,10 @@ DEFAULT_CRUNCHBASE_BUDGET = (
     Path.home()
     / "Library/Application Support/NormanAI/shared/crunchbase-budget.json"
 )
-BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v1"
-APPROVED_CEILING = 25
+BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v2"
+LEGACY_BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v1"
+APPROVED_CEILING = 40
+LEGACY_CEILING = 25
 WATCHER_LANE = "research-funding-watcher"
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -78,7 +80,7 @@ class DailyCrunchbaseBudget:
             or isinstance(ceiling, bool)
             or ceiling != APPROVED_CEILING
         ):
-            raise ValueError("Crunchbase budget ceiling must equal 25")
+            raise ValueError("Crunchbase budget ceiling must equal 40")
         self.path = path
         self.ceiling = ceiling
         self.lock_path = path.with_name("crunchbase-budget.lock")
@@ -97,7 +99,7 @@ class DailyCrunchbaseBudget:
             raise ValueError("funding watcher may reserve at most 2 pages")
         with self._locked():
             payload = self._payload_for(now)
-            granted = min(requested, self.ceiling - payload["used"])
+            granted = min(requested, payload["ceiling"] - payload["used"])
             payload["used"] += granted
             payload["lanes"][lane] = payload["lanes"].get(lane, 0) + granted
             _atomic_write_json(self.path, payload)
@@ -152,16 +154,21 @@ def _new_payload(date: str) -> dict[str, Any]:
 def _validate_budget(payload: dict[str, Any]) -> None:
     if set(payload) != {"schemaVersion", "date", "ceiling", "used", "lanes"}:
         raise RuntimeError("invalid shared Crunchbase budget shape")
-    if (
-        payload["schemaVersion"] != BUDGET_SCHEMA_VERSION
-        or payload["ceiling"] != APPROVED_CEILING
-    ):
+    version_and_ceiling = (
+        payload["schemaVersion"],
+        payload["ceiling"],
+    )
+    if version_and_ceiling not in {
+        (BUDGET_SCHEMA_VERSION, APPROVED_CEILING),
+        (LEGACY_BUDGET_SCHEMA_VERSION, LEGACY_CEILING),
+    }:
         raise RuntimeError("unsupported shared Crunchbase budget")
     used, lanes = payload["used"], payload["lanes"]
+    effective_ceiling = int(payload["ceiling"])
     if (
         not isinstance(used, int)
         or isinstance(used, bool)
-        or not 0 <= used <= APPROVED_CEILING
+        or not 0 <= used <= effective_ceiling
         or not isinstance(lanes, dict)
         or any(
             not isinstance(name, str)
