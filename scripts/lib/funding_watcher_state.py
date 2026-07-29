@@ -353,7 +353,18 @@ def migrate_legacy_state(
             raise RuntimeError("partial Research migration state")
         existing_ledger = _load_json(ledger_path)
         existing_receipt = _load_json(receipt_path)
-        if existing_ledger != new_payload or existing_receipt != receipt:
+        _validate_research_ledger(existing_ledger)
+        migrated_bootstrap = new_payload["bootstraps"][source]
+        original_events_match = all(
+            existing_ledger["events"].get(key) == record
+            for key, record in migrated_events.items()
+        )
+        if (
+            existing_receipt != receipt
+            or not original_events_match
+            or existing_ledger["bootstraps"].get(source)
+            != migrated_bootstrap
+        ):
             raise RuntimeError("Research migration state does not match legacy")
         return receipt
 

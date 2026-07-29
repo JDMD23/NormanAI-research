@@ -325,6 +325,130 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     assert (research / "migration-receipt.json").exists()
 
 
+def test_migration_idempotency_preserves_valid_post_migration_evolution(
+    tmp_path: Path,
+) -> None:
+    """Catches pristine-payload equality rejecting later watcher state."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    receipt = migrate_legacy_state(
+        legacy, research, expected_source_url=SOURCE
+    )
+
+    ledger = FundingWatcherLedger(research / "ledger.json")
+    added_key = hashlib.sha256(b"post-migration-event").hexdigest()
+    evolved_at = "2026-07-29T18:05:00+00:00"
+    ledger.observe(
+        added_key,
+        observed_at=evolved_at,
+        details={
+            "company": "Post Migration Co",
+            "source_url": SOURCE,
+        },
+    )
+    ledger.mark_handoff_pending(
+        added_key,
+        run_id="20260729T180500Z",
+        observed_at=evolved_at,
+    )
+    ledger.mark_terminal(
+        added_key,
+        outcome="queued_existing",
+        page_id="post-migration-page",
+        observed_at=evolved_at,
+    )
+    ledger.mark_slot_complete(
+        "2026-07-29T13:00:00-04:00",
+        run_id="20260729T180500Z",
+    )
+    before = {
+        path.relative_to(research): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(research.rglob("*"))
+        if path.is_file()
+    }
+
+    assert migrate_legacy_state(
+        legacy, research, expected_source_url=SOURCE
+    ) == receipt
+    assert {
+        path.relative_to(research): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(research.rglob("*"))
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda ledger, receipt, original_key: ledger["events"][
+            original_key
+        ]["details"].update(company="Changed"),
+        lambda ledger, receipt, original_key: ledger["events"].pop(
+            original_key
+        ),
+        lambda ledger, receipt, original_key: ledger["bootstraps"][
+            SOURCE
+        ].update(completedAt="2026-07-29T12:07:04+00:00"),
+        lambda ledger, receipt, original_key: receipt["counts"].update(
+            events=188
+        ),
+    ],
+    ids=[
+        "altered-original-event",
+        "missing-original-event",
+        "changed-original-bootstrap",
+        "changed-receipt",
+    ],
+)
+def test_migration_existing_artifacts_reject_original_state_or_receipt_drift(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    """Catches subset compatibility weakening immutable migration evidence."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    legacy_payload = _legacy_payload()
+    (legacy / "ledger.json").write_text(
+        json.dumps(legacy_payload, sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger_path = research / "ledger.json"
+    receipt_path = research / "migration-receipt.json"
+    ledger_payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    original_key = next(iter(legacy_payload["events"]))
+    mutate(ledger_payload, receipt_payload, original_key)
+    ledger_path.write_text(
+        json.dumps(ledger_payload, sort_keys=True), encoding="utf-8"
+    )
+    receipt_path.write_text(
+        json.dumps(receipt_payload, sort_keys=True), encoding="utf-8"
+    )
+    before = {
+        "ledger": ledger_path.read_bytes(),
+        "receipt": receipt_path.read_bytes(),
+    }
+
+    with pytest.raises(RuntimeError, match="migration state"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert ledger_path.read_bytes() == before["ledger"]
+    assert receipt_path.read_bytes() == before["receipt"]
+
+
 def test_migration_accepts_legacy_created_rows_without_repeated_source(
     tmp_path: Path,
 ) -> None:
