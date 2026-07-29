@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "norman.crm_core.funding_handoff_result.v1",
+  "runId": "20260729T120604Z",
+  "requestDigest": "REQUEST_DIGEST_REPLACED_BY_TEST",
+  "mode": "write",
+  "complete": true,
+  "events": [
+    {
+      "eventKey": "EVENT_KEY_REPLACED_BY_TEST",
+      "state": "created",
+      "reason": "no_matching_company",
+      "pageId": "page-1"
+    }
+  ]
+}
