@@ -12,3 +12,4 @@ out/funding-handoffs/
 *.db
 .DS_Store
 .pytest_cache/
+.worktrees/

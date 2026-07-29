@@ -44,7 +44,7 @@ def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> No
                 pass
 
 
-def test_concurrent_budget_claims_never_exceed_25(tmp_path: Path) -> None:
+def test_concurrent_budget_claims_never_exceed_40(tmp_path: Path) -> None:
     path = tmp_path / "budget.json"
     context = multiprocessing.get_context("fork")
     with context.Pool(20) as pool:
@@ -55,9 +55,9 @@ def test_concurrent_budget_claims_never_exceed_25(tmp_path: Path) -> None:
         grants = [result.get(timeout=10) for result in results]
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert sum(grants) == 25
-    assert payload["used"] == 25
-    assert sum(payload["lanes"].values()) == 25
+    assert sum(grants) == 40
+    assert payload["used"] == 40
+    assert sum(payload["lanes"].values()) == 40
 
 
 def test_detector_can_reserve_no_more_than_two_pages_per_source(
@@ -77,3 +77,30 @@ def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
     second = datetime(2026, 7, 30, 0, 1, tzinfo=NEW_YORK)
     assert budget.claim(first, requested=2, lane="research-funding-watcher") == 2
     assert budget.snapshot(second)["used"] == 0
+    assert budget.snapshot(second)["ceiling"] == 40
+
+
+def test_legacy_25_page_budget_is_honored_until_new_york_midnight(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "budget.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "norman.shared.crunchbase_budget.v1",
+                "date": "2026-07-29",
+                "ceiling": 25,
+                "used": 24,
+                "lanes": {"crm_crunchbase": 24},
+            }
+        ),
+        encoding="utf-8",
+    )
+    budget = DailyCrunchbaseBudget(path)
+    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    assert budget.claim(
+        now,
+        requested=2,
+        lane="research-funding-watcher",
+    ) == 1
