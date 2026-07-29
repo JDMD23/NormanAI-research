@@ -31,7 +31,9 @@ class FakeRunner:
         bootout_code: int = 0,
         bootstrap_code: int = 0,
         bootstrap_codes: list[int] | None = None,
+        bootstrap_errors: list[OSError | None] | None = None,
         plutil_code: int = 0,
+        plutil_error: OSError | None = None,
         tracked: bool = True,
         core_tracked: bool = True,
     ):
@@ -39,7 +41,9 @@ class FakeRunner:
         self.bootout_code = bootout_code
         self.bootstrap_code = bootstrap_code
         self.bootstrap_codes = list(bootstrap_codes or [])
+        self.bootstrap_errors = list(bootstrap_errors or [])
         self.plutil_code = plutil_code
+        self.plutil_error = plutil_error
         self.tracked = tracked
         self.core_tracked = core_tracked
         self.calls: list[list[str]] = []
@@ -62,6 +66,13 @@ class FakeRunner:
             )
         if command[:2] == ["launchctl", "bootstrap"]:
             self._observe_plist("bootstrap", Path(command[-1]))
+            error = (
+                self.bootstrap_errors.pop(0)
+                if self.bootstrap_errors
+                else None
+            )
+            if error is not None:
+                raise error
             code = (
                 self.bootstrap_codes.pop(0)
                 if self.bootstrap_codes
@@ -72,6 +83,8 @@ class FakeRunner:
             )
         if command[:2] == ["plutil", "-lint"]:
             self._observe_plist("lint", Path(command[-1]))
+            if self.plutil_error is not None:
+                raise self.plutil_error
             return SimpleNamespace(
                 returncode=self.plutil_code,
                 stdout="",
@@ -542,15 +555,14 @@ def test_atomic_install_preserves_existing_plist_when_replace_fails(
         raise OSError("injected atomic replace failure")
 
     monkeypatch.setattr(installer.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="injected atomic replace failure"):
-        main(
-            ["install", "--yes"],
-            repo_root=repo,
-            home=home,
-            python_path=Path("/usr/bin/python3"),
-            runner=runner,
-            uid=501,
-        )
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
 
     assert plist.read_bytes() == b"previous-complete-plist"
     assert list(plist.parent.glob(f".{plist.name}.*.tmp")) == []
@@ -703,6 +715,200 @@ def test_bootstrap_failure_reports_failed_prior_service_reload(
         prior_payload,
         0o600,
     )
+
+
+def test_plutil_oserror_restores_prior_plist_and_service(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o600)
+    runner = FakeRunner(
+        loaded=True,
+        plutil_error=OSError("injected plutil transport failure"),
+    )
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert "plist validation failed" in error
+    assert "OSError" in error
+    assert "injected plutil transport failure" in error
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o600
+    assert runner.plist_observations[-1] == (
+        "bootstrap",
+        prior_payload,
+        0o600,
+    )
+
+
+def test_candidate_bootstrap_oserror_restores_prior_plist_and_service(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o640)
+    runner = FakeRunner(
+        loaded=True,
+        bootstrap_errors=[
+            OSError("injected bootstrap transport failure"),
+            None,
+        ],
+    )
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert "launchctl bootstrap failed" in error
+    assert "OSError" in error
+    assert "injected bootstrap transport failure" in error
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o640
+    assert runner.plist_observations[-1] == (
+        "bootstrap",
+        prior_payload,
+        0o640,
+    )
+
+
+def test_first_install_bootstrap_oserror_removes_candidate(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    runner = FakeRunner(
+        bootstrap_errors=[OSError("injected first bootstrap failure")]
+    )
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert "launchctl bootstrap failed" in error
+    assert "injected first bootstrap failure" in error
+    assert not plist.exists()
+    assert list(plist.parent.glob(f".{plist.name}.*.tmp")) == []
+
+
+@pytest.mark.parametrize("prior_exists", [False, True])
+def test_directory_fsync_error_after_replace_rolls_back_filesystem(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    prior_exists: bool,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    prior_payload = prior_plist_payload()
+    if prior_exists:
+        plist.parent.mkdir(parents=True)
+        plist.write_bytes(prior_payload)
+        plist.chmod(0o600)
+    runner = FakeRunner(loaded=prior_exists)
+    real_fsync = installer.os.fsync
+    fsync_calls = 0
+
+    def fail_candidate_directory_fsync(fd: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            assert plist.exists()
+            if prior_exists:
+                assert plist.read_bytes() != prior_payload
+            raise OSError("injected directory fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(installer.os, "fsync", fail_candidate_directory_fsync)
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert "plist installation failed" in error
+    assert "injected directory fsync failure" in error
+    if prior_exists:
+        assert plist.read_bytes() == prior_payload
+        assert plist.stat().st_mode & 0o777 == 0o600
+        assert runner.plist_observations[-1] == (
+            "bootstrap",
+            prior_payload,
+            0o600,
+        )
+    else:
+        assert not plist.exists()
+
+
+def test_rollback_reload_oserror_preserves_primary_failure(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, home, _ = setup_checkout(tmp_path)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    prior_payload = prior_plist_payload()
+    plist.write_bytes(prior_payload)
+    plist.chmod(0o600)
+    runner = FakeRunner(
+        loaded=True,
+        bootstrap_codes=[5],
+        bootstrap_errors=[
+            None,
+            OSError("injected rollback reload failure"),
+        ],
+    )
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 70
+
+    error = capsys.readouterr().err
+    assert error.startswith("launchctl bootstrap failed")
+    assert "rollback failed" in error
+    assert "OSError" in error
+    assert "injected rollback reload failure" in error
+    assert plist.read_bytes() == prior_payload
+    assert plist.stat().st_mode & 0o777 == 0o600
 
 
 def test_status_checks_both_plist_and_loaded_service(tmp_path: Path) -> None:

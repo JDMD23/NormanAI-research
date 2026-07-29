@@ -272,7 +272,7 @@ def _atomic_write(
             os.fsync(directory)
         finally:
             os.close(directory)
-    except Exception:
+    except OSError:
         temporary.unlink(missing_ok=True)
         raise
 
@@ -305,23 +305,30 @@ def _rollback_install(
         else:
             _atomic_write(plist, previous_payload, mode=previous_mode)
             restored = True
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         errors.append(f"plist restore failed: {type(exc).__name__}: {exc}")
     if reload_previous:
         if previous_payload is None:
             errors.append("prior loaded service had no restorable plist")
         elif restored:
-            reloaded = _run(
-                runner,
-                [
-                    "launchctl",
-                    "bootstrap",
-                    f"gui/{uid}",
-                    str(plist),
-                ],
-            )
-            if reloaded.returncode:
-                errors.append("prior service reload failed")
+            try:
+                reloaded = _run(
+                    runner,
+                    [
+                        "launchctl",
+                        "bootstrap",
+                        f"gui/{uid}",
+                        str(plist),
+                    ],
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(
+                    "prior service reload failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if reloaded.returncode:
+                    errors.append("prior service reload failed")
     return errors
 
 
@@ -381,43 +388,50 @@ def _install(
     if previous_payload == payload and is_loaded:
         print(f"{LABEL} is already installed and loaded")
         return OK
-    if is_loaded:
-        bootout = _run(
-            runner,
-            [
-                "launchctl",
-                "bootout",
-                f"gui/{uid}",
-                str(paths["plist"]),
-            ],
-        )
-        if bootout.returncode:
-            print("launchctl bootout failed", file=sys.stderr)
-            return INTERNAL
-    _atomic_write(paths["plist"], payload)
-    lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
-    if lint.returncode:
+    stage = "launchctl bootout"
+    bootout_failed = False
+    failure: str | None = None
+    try:
+        if is_loaded:
+            bootout = _run(
+                runner,
+                [
+                    "launchctl",
+                    "bootout",
+                    f"gui/{uid}",
+                    str(paths["plist"]),
+                ],
+            )
+            if bootout.returncode:
+                bootout_failed = True
+        if not bootout_failed:
+            stage = "plist installation"
+            _atomic_write(paths["plist"], payload)
+            stage = "plist validation"
+            lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
+            if lint.returncode:
+                failure = "plist validation failed"
+            else:
+                stage = "launchctl bootstrap"
+                loaded = _run(
+                    runner,
+                    [
+                        "launchctl",
+                        "bootstrap",
+                        f"gui/{uid}",
+                        str(paths["plist"]),
+                    ],
+                )
+                if loaded.returncode:
+                    failure = "launchctl bootstrap failed"
+    except (OSError, subprocess.SubprocessError) as exc:
+        failure = f"{stage} failed: {type(exc).__name__}: {exc}"
+    if bootout_failed:
+        print("launchctl bootout failed", file=sys.stderr)
+        return INTERNAL
+    if failure is not None:
         return _post_replace_failure(
-            "plist validation failed",
-            plist=paths["plist"],
-            previous_payload=previous_payload,
-            previous_mode=previous_mode,
-            reload_previous=is_loaded,
-            runner=runner,
-            uid=uid,
-        )
-    loaded = _run(
-        runner,
-        [
-            "launchctl",
-            "bootstrap",
-            f"gui/{uid}",
-            str(paths["plist"]),
-        ],
-    )
-    if loaded.returncode:
-        return _post_replace_failure(
-            "launchctl bootstrap failed",
+            failure,
             plist=paths["plist"],
             previous_payload=previous_payload,
             previous_mode=previous_mode,
