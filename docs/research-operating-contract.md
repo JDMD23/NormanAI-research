@@ -27,12 +27,14 @@ writers. Research has no Notion mutation client or property authority.
 
 ## 2. The one-writer rule
 
-`crm_intake.py` is the only thing that writes Norman CRM Core. This is not a
-style preference:
+Only CRM Core owns writes to the Norman CRM board. Research has two public,
+upstream handoffs: candidate CSV to Core's `crm_intake.py`, and typed
+funding-event JSON to Core's `crm_funding_handoff.py`. Neither makes Research a
+writer or grants it Notion property authority. This is not a style preference:
 
-- Intake holds the hard-dedup index (domain · LinkedIn · Crunchbase · normalised
-  name) built from the live board. A second writer cannot see that index and
-  will create duplicates.
+- Core holds the hard-dedup index (domain · LinkedIn · Crunchbase · normalised
+  name) built from the live board. A Research-side writer cannot share that
+  authority safely and will create duplicates.
 - Intake seeds the Need-\* markers in the exact combination the lanes expect. A
   row created any other way is invisible to the daily loop or thrashes it.
 - The strangler blueprint's failure mode is two boards fighting. Two writers to

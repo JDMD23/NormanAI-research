@@ -18,8 +18,28 @@ Crunchbase work shares a ceiling of 25 page reservations per New York day:
 
 State and immutable receipts live under
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
-Requests/results live in its `handoffs/` subdirectory. `retryable` events remain
-open; only a validated Core terminal result closes them.
+The exact durable artifacts are:
+
+- `ledger.json` — event lifecycle and completed slots
+- `receipts/<runId>.json` — immutable detector receipt
+- `handoffs/<runId>.request.json` — typed request handed to Core
+- `handoffs/<runId>.result.json` — durable Core result
+- `latest.json` — replaceable summary of the latest run
+- `migration-receipt.json` — proof of the read-only legacy import
+
+An event moves `observed → handoff_pending → terminal` only after a validated
+Core result is durable. `retryable` remains nonterminal and is eligible for a
+later handoff. Core terminal results are `created`, `queued_existing`,
+`duplicate_event`, `rejected_identity`, or `ambiguous_review`.
+
+Watcher exit `0` covers clean completion, no change, disabled, outside
+schedule, and already-checked/bootstrap-complete runs. Exit `75` means retry
+(`busy`, budget exhaustion, browser retry, or CRM retry); exit `78` means a
+source, auth/CAPTCHA, budget-state, migration, or schema contract failure; exit
+`64` is command misuse. Check and bootstrap orchestration outcomes write a
+status-bearing run receipt. CLI argument/config failures and migration failures
+report through stderr and their exit code; successful migration writes the
+separate `migration-receipt.json`, which has no run `status`.
 
 The generic Crunchbase source is disabled. Broader Research browser work is
 offset to **07:15 and 14:15** so it does not collide with the strict watcher.
@@ -29,7 +49,12 @@ Install only after both repos pass acceptance from merged permanent checkouts:
 ```bash
 python3 scripts/install_funding_watcher_launch_agent.py install --yes
 python3 scripts/install_funding_watcher_launch_agent.py status
+python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
 ```
+
+`status` verifies that the installed plist exists and the service is loaded.
+`uninstall` bootouts the service before removing the plist and preserves
+watcher state and logs.
 
 ## Broader daily discovery
 
