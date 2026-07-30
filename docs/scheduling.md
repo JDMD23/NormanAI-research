@@ -26,6 +26,7 @@ The exact durable artifacts are:
 - `handoffs/<runId>.request.json` — typed request handed to Core
 - `handoffs/<runId>.result.json` — durable Core result
 - `latest.json` — replaceable summary of the latest run
+- `heartbeat.json` — replaceable health, last-success, failure, and alert state
 - `migration-receipt.json` — proof of the read-only legacy import
 
 An event moves `observed → handoff_pending → terminal` only after a validated
@@ -42,6 +43,18 @@ status-bearing run receipt. CLI argument/config failures and migration failures
 report through stderr and their exit code; successful migration writes the
 separate `migration-receipt.json`, which has no run `status`.
 
+A scheduled check cannot reserve pages until every configured source has a
+completed bootstrap marker. `bootstrap_required/source_not_bootstrapped`
+returns exit 78 without browser access and leaves the slot open. Actionable row
+rejections likewise fail closed; intentional industry exclusions are counted
+and receipt-visible but do not make an otherwise trusted snapshot ambiguous.
+
+Heartbeat publication occurs after the immutable receipt and `latest.json`,
+and before notification. Configuration failures notify on the first new
+status/reason; retryable failures notify on the second consecutive occurrence;
+unchanged alerts are deduplicated until success or a different failure.
+Notification is best-effort and never changes the ledger.
+
 The generic Crunchbase source is disabled. Broader Research browser work is
 offset to **07:15 and 14:15** so it does not collide with the strict watcher.
 
@@ -56,6 +69,8 @@ python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
 `status` verifies that the installed plist exists and the service is loaded.
 `uninstall` bootouts the service before removing the plist and preserves
 watcher state and logs.
+
+The repository does not install or activate this service automatically.
 
 ## Broader daily discovery
 
