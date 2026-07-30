@@ -1,7 +1,7 @@
 {
   "schemaVersion": "norman.research.crm_core_compatibility.v1",
   "repository": "JDMD23/NormanAI-crm-core",
-  "commit": "bc76954ff438ce4c5568735bba481976c60e53d0",
+  "commit": "fab5bae5da95794e045b526d2cbd2b8124b3e84c",
   "requestSchemaVersion": "norman.research.funding_handoff.v1",
   "resultSchemaVersion": "norman.crm_core.funding_handoff_result.v1"
 }

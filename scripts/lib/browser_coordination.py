@@ -1,4 +1,4 @@
-"""Cross-repository browser lease and Crunchbase page-budget protocol."""
+"""Cross-repository browser lease and Crunchbase work-item protocol."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -20,8 +21,19 @@ DEFAULT_BROWSER_LOCK = _PRODUCTION_SHARED_ROOT / "browser.lock"
 DEFAULT_CRUNCHBASE_BUDGET = (
     _PRODUCTION_SHARED_ROOT / "crunchbase-budget.json"
 )
-BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v1"
-APPROVED_CEILING = 25
+BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v3"
+LEGACY_BUDGET_SCHEMAS = {
+    "norman.shared.crunchbase_budget.v1": 25,
+    "norman.shared.crunchbase_budget.v2": 40,
+}
+APPROVED_CEILING = 40
+CORE_NAVIGATION_LIMIT = 5
+GROUP_LIMITS = {"core": 30, "research": 10}
+LANE_GROUPS = {
+    "crm_crunchbase": "core",
+    "research-funding-watcher": "research",
+    "research-funding-bootstrap": "research",
+}
 WATCHER_LANE = "research-funding-watcher"
 NEW_YORK = ZoneInfo("America/New_York")
 SHARED_STATE_ENV = "NORMANAI_SHARED_STATE_DIR"
@@ -47,6 +59,13 @@ def _guard_test_state_path(path: Path) -> Path:
     )
 
 
+@dataclass(frozen=True)
+class CoreCompanyReservation:
+    granted: bool
+    navigation_limit: int
+    schema_version: str
+
+
 class BrowserLeaseUnavailable(RuntimeError):
     """Another process owns the one shared logged-in browser."""
 
@@ -56,7 +75,7 @@ class SharedBrowserLease:
 
     def __init__(self, path: Path | None = None):
         self.path = _guard_test_state_path(
-            path if path is not None else shared_state_root() / "browser.lock"
+            path or (shared_state_root() / "browser.lock")
         )
         self._fd: int | None = None
 
@@ -80,7 +99,12 @@ class SharedBrowserLease:
         self._fd = fd
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+    def __exit__(
+        self,
+        exc_type: object,
+        exc: object,
+        tb: object,
+    ) -> None:
         if self._fd is None:
             return
         fcntl.flock(self._fd, fcntl.LOCK_UN)
@@ -89,7 +113,7 @@ class SharedBrowserLease:
 
 
 class DailyCrunchbaseBudget:
-    """Atomic New-York-day page reservation budget shared with CRM Core."""
+    """Atomic New-York-day work budget shared with CRM Core."""
 
     def __init__(
         self,
@@ -101,11 +125,9 @@ class DailyCrunchbaseBudget:
             or isinstance(ceiling, bool)
             or ceiling != APPROVED_CEILING
         ):
-            raise ValueError("Crunchbase budget ceiling must equal 25")
+            raise ValueError("Crunchbase budget ceiling must equal 40")
         self.path = _guard_test_state_path(
-            path
-            if path is not None
-            else shared_state_root() / "crunchbase-budget.json"
+            path or (shared_state_root() / "crunchbase-budget.json")
         )
         self.ceiling = ceiling
         self.lock_path = self.path.with_name("crunchbase-budget.lock")
@@ -120,16 +142,17 @@ class DailyCrunchbaseBudget:
     ) -> int:
         _require_aware(now)
         _require_requested(requested)
-        if not isinstance(lane, str) or not lane.strip():
-            raise ValueError("lane must be a non-empty string")
         if not isinstance(exact, bool):
             raise ValueError("exact must be boolean")
+        group = _require_lane(lane)
         if lane == WATCHER_LANE and requested > 2:
-            raise ValueError("funding watcher may reserve at most 2 pages")
+            raise ValueError(
+                "funding watcher may reserve at most 2 checks"
+            )
         with self._locked():
             payload = self._payload_for(now)
             accounting_lane = lane
-            lane_remaining = self.ceiling
+            lane_remaining = payload["ceiling"]
             if lane == WATCHER_LANE:
                 slot = now.astimezone(NEW_YORK).replace(
                     minute=0, second=0, microsecond=0
@@ -140,10 +163,13 @@ class DailyCrunchbaseBudget:
                     + payload["lanes"].get(accounting_lane, 0)
                 )
                 lane_remaining = max(0, 2 - lane_used)
-            available = min(
-                self.ceiling - payload["used"],
-                lane_remaining,
-            )
+            available = payload["ceiling"] - payload["used"]
+            if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
+                available = min(
+                    available,
+                    GROUP_LIMITS[group] - _group_used(payload, group),
+                )
+            available = min(available, lane_remaining)
             granted = (
                 0
                 if exact and available < requested
@@ -156,10 +182,88 @@ class DailyCrunchbaseBudget:
             _atomic_write_json(self.path, payload)
             return granted
 
+    def claim_core_company_session(
+        self,
+        now: datetime,
+    ) -> CoreCompanyReservation:
+        _require_aware(now)
+        lane = "crm_crunchbase"
+        with self._locked():
+            payload = self._payload_for(now)
+            schema_version = str(payload["schemaVersion"])
+            requested = (
+                1
+                if schema_version == BUDGET_SCHEMA_VERSION
+                else CORE_NAVIGATION_LIMIT
+            )
+            available = payload["ceiling"] - payload["used"]
+            if schema_version == BUDGET_SCHEMA_VERSION:
+                available = min(
+                    available,
+                    GROUP_LIMITS["core"] - _group_used(payload, "core"),
+                )
+            if available < requested:
+                return CoreCompanyReservation(
+                    granted=False,
+                    navigation_limit=0,
+                    schema_version=schema_version,
+                )
+            payload["used"] += requested
+            payload["lanes"][lane] = (
+                payload["lanes"].get(lane, 0) + requested
+            )
+            _atomic_write_json(self.path, payload)
+            return CoreCompanyReservation(
+                granted=True,
+                navigation_limit=CORE_NAVIGATION_LIMIT,
+                schema_version=schema_version,
+            )
+
     def snapshot(self, now: datetime) -> dict[str, Any]:
         _require_aware(now)
         with self._locked():
             return self._payload_for(now)
+
+    def capacity(self, now: datetime) -> dict[str, Any]:
+        payload = self.snapshot(now)
+        total_remaining = payload["ceiling"] - payload["used"]
+        if payload["schemaVersion"] != BUDGET_SCHEMA_VERSION:
+            return {
+                "schemaVersion": payload["schemaVersion"],
+                "unit": "legacy_pages",
+                "total": {
+                    "used": payload["used"],
+                    "limit": payload["ceiling"],
+                    "remaining": total_remaining,
+                },
+                "core": {
+                    "used": payload["lanes"].get("crm_crunchbase", 0),
+                    "limit": payload["ceiling"],
+                    "remaining": total_remaining // CORE_NAVIGATION_LIMIT,
+                },
+                "research": {
+                    "used": _group_used(payload, "research"),
+                    "limit": payload["ceiling"],
+                    "remaining": total_remaining,
+                },
+            }
+        return {
+            "schemaVersion": payload["schemaVersion"],
+            "unit": "work_items",
+            "total": {
+                "used": payload["used"],
+                "limit": payload["ceiling"],
+                "remaining": total_remaining,
+            },
+            **{
+                group: {
+                    "used": _group_used(payload, group),
+                    "limit": limit,
+                    "remaining": limit - _group_used(payload, group),
+                }
+                for group, limit in GROUP_LIMITS.items()
+            },
+        }
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -181,9 +285,13 @@ class DailyCrunchbaseBudget:
         if not self.path.exists():
             return _new_payload(local_date.isoformat())
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = json.loads(
+                self.path.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError("invalid shared Crunchbase budget") from exc
+            raise RuntimeError(
+                "invalid shared Crunchbase budget"
+            ) from exc
         if not isinstance(payload, dict):
             raise RuntimeError("invalid shared Crunchbase budget")
         persisted_date = _validate_budget(payload)
@@ -205,12 +313,26 @@ def _new_payload(ledger_date: str) -> dict[str, Any]:
 
 
 def _validate_budget(payload: dict[str, Any]) -> date:
-    if set(payload) != {"schemaVersion", "date", "ceiling", "used", "lanes"}:
+    if set(payload) != {
+        "schemaVersion",
+        "date",
+        "ceiling",
+        "used",
+        "lanes",
+    }:
         raise RuntimeError("invalid shared Crunchbase budget shape")
-    if (
-        payload["schemaVersion"] != BUDGET_SCHEMA_VERSION
-        or payload["ceiling"] != APPROVED_CEILING
-    ):
+    version_and_ceiling = (
+        payload["schemaVersion"],
+        payload["ceiling"],
+    )
+    supported = {
+        (BUDGET_SCHEMA_VERSION, APPROVED_CEILING),
+        *{
+            (schema, ceiling)
+            for schema, ceiling in LEGACY_BUDGET_SCHEMAS.items()
+        },
+    }
+    if version_and_ceiling not in supported:
         raise RuntimeError("unsupported shared Crunchbase budget")
     persisted_date = payload["date"]
     if not isinstance(persisted_date, str):
@@ -222,10 +344,13 @@ def _validate_budget(payload: dict[str, Any]) -> date:
     if parsed_date.isoformat() != persisted_date:
         raise RuntimeError("invalid shared Crunchbase budget values")
     used, lanes = payload["used"], payload["lanes"]
+    effective_ceiling = payload["ceiling"]
     if (
-        not isinstance(used, int)
+        not isinstance(effective_ceiling, int)
+        or isinstance(effective_ceiling, bool)
+        or not isinstance(used, int)
         or isinstance(used, bool)
-        or not 0 <= used <= APPROVED_CEILING
+        or not 0 <= used <= effective_ceiling
         or not isinstance(lanes, dict)
         or any(
             not isinstance(name, str)
@@ -238,11 +363,25 @@ def _validate_budget(payload: dict[str, Any]) -> date:
         or sum(lanes.values()) != used
     ):
         raise RuntimeError("invalid shared Crunchbase budget values")
+    if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
+        if any(_lane_group(name) is None for name in lanes):
+            raise RuntimeError("invalid shared Crunchbase lane")
+        if any(
+            _group_used(payload, group) > limit
+            for group, limit in GROUP_LIMITS.items()
+        ):
+            raise RuntimeError(
+                "invalid shared Crunchbase allocation"
+            )
     return parsed_date
 
 
 def _require_aware(now: datetime) -> None:
-    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+    if (
+        not isinstance(now, datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
+    ):
         raise ValueError("datetime must be timezone-aware")
 
 
@@ -255,10 +394,48 @@ def _require_requested(requested: int) -> None:
         raise ValueError("requested must be a non-negative integer")
 
 
+def _require_lane(lane: str) -> str:
+    if not isinstance(lane, str) or not lane.strip():
+        raise ValueError("lane must be a non-empty string")
+    group = _lane_group(lane)
+    if group is None:
+        raise ValueError(f"unapproved Crunchbase lane: {lane}")
+    return group
+
+
+def _lane_group(lane: str) -> str | None:
+    prefix = f"{WATCHER_LANE}@"
+    if lane.startswith(prefix):
+        try:
+            slot = datetime.fromisoformat(lane.removeprefix(prefix))
+        except ValueError:
+            return None
+        if (
+            slot.tzinfo is None
+            or slot.utcoffset() is None
+            or slot.minute != 0
+            or slot.second != 0
+            or slot.microsecond != 0
+        ):
+            return None
+        return "research"
+    return LANE_GROUPS.get(lane)
+
+
+def _group_used(payload: dict[str, Any], group: str) -> int:
+    return sum(
+        amount
+        for lane, amount in payload["lanes"].items()
+        if _lane_group(lane) == group
+    )
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
     )
     temporary = Path(name)
     try:

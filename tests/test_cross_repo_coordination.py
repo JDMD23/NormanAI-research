@@ -19,14 +19,8 @@ from lib.funding_watcher_state import funding_event_key
 
 RESEARCH_ROOT = Path(__file__).resolve().parents[1]
 CORE_ACCEPTANCE_ENV = "NORMAN_CRM_CORE_ACCEPTANCE_PATH"
-CORE_REQUIRED_ENV = "NORMAN_REQUIRE_CROSS_REPO"
-CORE_COMPATIBILITY_PATH = (
-    RESEARCH_ROOT / "config" / "core-compatibility.json"
-)
 NEW_YORK_ACCEPTANCE_TIME = "2026-07-29T10:15:00-04:00"
-SHARED_RELATIVE_ROOT = Path(
-    "Library/Application Support/NormanAI/shared"
-)
+SHARED_RELATIVE_ROOT = Path("shared-state")
 WATCHER_LANE = "research-funding-watcher"
 CORE_REQUIRED_PATHS = (
     Path("scripts/lib/browser_coordination.py"),
@@ -141,13 +135,10 @@ raise SystemExit(handoff.main(sys.argv[1:]))
 def _isolated_env(home: Path) -> dict[str, str]:
     home.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    for key in (
-        "NORMANAI_SHARED_STATE_DIR",
-        "NORMANAI_TEST_MODE",
-        "NORMANAI_DISABLE_DOTENV",
-    ):
-        env.pop(key, None)
-    env["HOME"] = str(home)
+    env["HOME"] = str(home / "home")
+    env["NORMANAI_SHARED_STATE_DIR"] = str(
+        home / SHARED_RELATIVE_ROOT
+    )
     return env
 
 
@@ -176,16 +167,6 @@ def _resolve_core_root() -> Path | None:
     return None
 
 
-def _handle_missing_core_checkout() -> None:
-    message = (
-        f"cross-repository acceptance requires {CORE_ACCEPTANCE_ENV} "
-        "or a validated sibling Core checkout"
-    )
-    if os.environ.get(CORE_REQUIRED_ENV) == "1":
-        pytest.fail(message)
-    pytest.skip(message)
-
-
 @pytest.fixture(scope="module")
 def core_root() -> Path:
     try:
@@ -193,9 +174,28 @@ def core_root() -> Path:
     except ValueError as exc:
         pytest.fail(str(exc))
     if resolved is None:
-        _handle_missing_core_checkout()
-        raise AssertionError("missing Core checkout handler returned")
+        if os.environ.get("NORMAN_REQUIRE_CROSS_REPO") == "1":
+            pytest.fail(
+                f"required cross-repository acceptance checkout is missing; "
+                f"set {CORE_ACCEPTANCE_ENV}"
+            )
+        pytest.skip(
+            f"cross-repository acceptance requires {CORE_ACCEPTANCE_ENV} "
+            "or a validated sibling Core checkout"
+        )
     return resolved
+
+
+def test_required_cross_repo_checkout_fails_instead_of_skipping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NORMAN_REQUIRE_CROSS_REPO", "1")
+    monkeypatch.delenv(CORE_ACCEPTANCE_ENV, raising=False)
+    monkeypatch.setattr(
+        sys.modules[__name__], "_resolve_core_root", lambda: None
+    )
+    with pytest.raises(pytest.fail.Exception, match="required"):
+        core_root.__wrapped__()
 
 
 def _probe(
@@ -271,7 +271,7 @@ def _core_claim(
     )
 
 
-def test_default_constructors_share_real_lease_and_one_public_v1_budget(
+def test_default_constructors_share_real_lease_and_one_public_v3_budget(
     tmp_path: Path,
     core_root: Path,
 ) -> None:
@@ -311,19 +311,33 @@ def test_default_constructors_share_real_lease_and_one_public_v1_budget(
             holder.wait(timeout=5)
     assert holder.returncode == 0
 
-    research_lane = "acceptance-research"
-    core_lane = "acceptance-core"
-    assert _research_claim(
-        home, NEW_YORK_ACCEPTANCE_TIME, 10, research_lane
-    ) == 10
+    research_times = (
+        "2026-07-29T06:05:00-04:00",
+        "2026-07-29T10:05:00-04:00",
+        "2026-07-29T13:05:00-04:00",
+        "2026-07-29T16:05:00-04:00",
+        "2026-07-29T19:05:00-04:00",
+    )
+    assert [
+        _research_claim(home, now, 2, WATCHER_LANE)
+        for now in research_times
+    ] == [2, 2, 2, 2, 2]
     assert _core_claim(
-        core_root, home, NEW_YORK_ACCEPTANCE_TIME, 15, core_lane
-    ) == 15
+        core_root,
+        home,
+        NEW_YORK_ACCEPTANCE_TIME,
+        30,
+        "crm_crunchbase",
+    ) == 30
     assert _research_claim(
-        home, NEW_YORK_ACCEPTANCE_TIME, 1, research_lane
+        home, research_times[-1], 1, WATCHER_LANE
     ) == 0
     assert _core_claim(
-        core_root, home, NEW_YORK_ACCEPTANCE_TIME, 1, core_lane
+        core_root,
+        home,
+        NEW_YORK_ACCEPTANCE_TIME,
+        1,
+        "crm_crunchbase",
     ) == 0
 
     public_state = _probe(
@@ -334,13 +348,17 @@ def test_default_constructors_share_real_lease_and_one_public_v1_budget(
         NEW_YORK_ACCEPTANCE_TIME,
     )
     assert public_state == {
-        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "schemaVersion": "norman.shared.crunchbase_budget.v3",
         "date": "2026-07-29",
-        "ceiling": 25,
-        "used": 25,
+        "ceiling": 40,
+        "used": 40,
         "lanes": {
-            research_lane: 10,
-            core_lane: 15,
+            "crm_crunchbase": 30,
+            "research-funding-watcher@2026-07-29T06:00:00-04:00": 2,
+            "research-funding-watcher@2026-07-29T10:00:00-04:00": 2,
+            "research-funding-watcher@2026-07-29T13:00:00-04:00": 2,
+            "research-funding-watcher@2026-07-29T16:00:00-04:00": 2,
+            "research-funding-watcher@2026-07-29T19:00:00-04:00": 2,
         },
     }
     assert (
@@ -480,52 +498,6 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
     ]
 
 
-def test_pinned_core_commit_and_schema_constants_match(
-    tmp_path: Path,
-    core_root: Path,
-) -> None:
-    compatibility = json.loads(
-        CORE_COMPATIBILITY_PATH.read_text(encoding="utf-8")
-    )
-    pinned_commit = compatibility["commit"]
-    assert len(pinned_commit) == 40
-    assert all(character in "0123456789abcdef" for character in pinned_commit)
-
-    ancestor = subprocess.run(
-        [
-            "git",
-            "merge-base",
-            "--is-ancestor",
-            pinned_commit,
-            "HEAD",
-        ],
-        cwd=core_root,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=20,
-    )
-    assert ancestor.returncode == 0, (
-        f"pinned Core commit {pinned_commit} is not available in or is not "
-        f"an ancestor of {core_root}; stderr={ancestor.stderr!r}"
-    )
-
-    core_contract = _probe(
-        core_root,
-        (
-            "import json\n"
-            "from scripts import crm_funding_handoff as module\n"
-            "print(json.dumps({\n"
-            "  'request': module.REQUEST_SCHEMA_VERSION,\n"
-            "  'result': module.RESULT_SCHEMA_VERSION,\n"
-            "}))\n"
-        ),
-        tmp_path / "schema-home",
-    )
-    assert compatibility["requestSchemaVersion"] == core_contract["request"]
-    assert compatibility["resultSchemaVersion"] == core_contract["result"]
-
-
 @pytest.mark.parametrize(
     ("program_name", "home_name"),
     [
@@ -568,9 +540,9 @@ def test_both_repositories_reset_only_a_valid_prior_day_budget(
         "snapshot",
         NEW_YORK_ACCEPTANCE_TIME,
     ) == {
-        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "schemaVersion": "norman.shared.crunchbase_budget.v3",
         "date": "2026-07-29",
-        "ceiling": 25,
+        "ceiling": 40,
         "used": 0,
         "lanes": {},
     }

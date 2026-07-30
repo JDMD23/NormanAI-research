@@ -1,5 +1,8 @@
 # Funding Watcher Safe-Release Follow-up Implementation Plan
 
+> Historical v1/25-page plan. Superseded by the implemented v3 30/10/40
+> contract in `docs/scheduling.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Research's existing v1 funding watcher complete within its

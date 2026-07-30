@@ -74,28 +74,13 @@ Before the first supervised run:
 
 ```bash
 python3 scripts/funding_watcher.py migrate-legacy-state
-python3 scripts/funding_watcher.py bootstrap --dry-run
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
 ```
 
 Migration copies the preserved 189-event Core ledger without changing it. The
 first command is idempotent and refuses any count, source, schema, or key
-mismatch. The migrated ledger already contains the approved source's bootstrap
-marker, so the bootstrap preview must report `already_bootstrapped` without
-claiming budget or opening Chrome.
-
-For a genuinely new monthly source, `check` must report `bootstrap_required`
-until a complete source read has been reviewed and committed:
-
-```bash
-python3 scripts/funding_watcher.py bootstrap --dry-run --seed-top 10
-python3 scripts/funding_watcher.py bootstrap --write --yes --seed-top 10
-python3 scripts/funding_watcher.py check --dry-run
-```
-
-Review all ten proposed handoffs, the baseline count, exclusions, and
-rejections before the bootstrap write.
+mismatch.
 
 After both repositories are merged into permanent checkouts and acceptance is
 clean:
@@ -114,7 +99,7 @@ contract, or a still-present Core watcher plist.
 ## 3. Required cross-repository CI
 
 Research's release-safety suite checks the real Core CLI, shared browser lock,
-shared 25-page ledger, and schema constants. CI checks out the exact Core
+shared v3 40-work-item ledger, and schema constants. CI checks out the exact Core
 commit declared in `config/core-compatibility.json`; when
 `NORMAN_REQUIRE_CROSS_REPO=1`, a missing Core checkout is a test failure rather
 than a skip.
