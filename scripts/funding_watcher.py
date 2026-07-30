@@ -57,6 +57,7 @@ CONFIG_ERROR_STATUSES = {
     "source_drift",
     "result_schema_mismatch",
     "budget_state_invalid",
+    "bootstrap_required",
 }
 TERMINAL_CORE_STATES = {
     "created",
@@ -103,10 +104,22 @@ def run_check(
                 state_root, receipt, "already_checked_slot", "slot_already_complete"
             )
 
+        sources = config["sourceDefinitions"]
+        if not all(
+            dependencies.ledger.bootstrap_complete(source.url)
+            for source in sources
+        ):
+            return _finish(
+                state_root,
+                receipt,
+                "bootstrap_required",
+                "source_not_bootstrapped",
+            )
+
         max_pages = config["scheduledMaxPagesPerSource"]
         snapshots = []
         try:
-            for source in config["sourceDefinitions"]:
+            for source in sources:
                 try:
                     granted = dependencies.budget.claim(
                         now,
