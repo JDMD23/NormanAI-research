@@ -172,7 +172,16 @@ def run_check(
         pending: list[tuple[str, FundingObservation]] = []
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
-            receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
+            excluded, actionable = _partition_rejections(snapshot.rejections)
+            receipt["counts"]["excluded_industry"] += len(excluded)
+            receipt["counts"]["rejected_parse"] += len(actionable)
+            if actionable:
+                return _finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "source_rows_rejected",
+                )
             covered_rows = len(snapshot.observations) + len(snapshot.rejections)
             if (
                 not snapshot.new_at_top
@@ -193,13 +202,6 @@ def run_check(
                 )
             rows_to_diff = snapshot.observations
             if covered_rows < snapshot.result_count:
-                if snapshot.rejections:
-                    return _finish(
-                        state_root,
-                        receipt,
-                        "source_drift",
-                        "ambiguous_truncated_snapshot",
-                    )
                 anchor_index = next(
                     (
                         index
@@ -415,6 +417,16 @@ def run_bootstrap(
         observations: list[FundingObservation] = []
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
+            excluded, actionable = _partition_rejections(snapshot.rejections)
+            receipt["counts"]["excluded_industry"] += len(excluded)
+            receipt["counts"]["rejected_parse"] += len(actionable)
+            if actionable:
+                return _finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "source_rows_rejected",
+                )
             if snapshot.result_count != len(snapshot.observations) + len(snapshot.rejections):
                 return _finish(
                     state_root, receipt, "source_drift", "incomplete_bootstrap_coverage"
@@ -439,6 +451,8 @@ def run_bootstrap(
                     "queued_existing": 0,
                     "baselined": added,
                     "already_terminal": already_terminal,
+                    "rejected_parse": 0,
+                    "excluded_industry": receipt["counts"]["excluded_industry"],
                 }
             else:
                 receipt["counts"]["would_baseline"] = len(baseline)
@@ -513,6 +527,8 @@ def run_bootstrap(
             "queued_existing": 0,
             "baselined": 0,
             "already_terminal": already_terminal,
+            "rejected_parse": 0,
+            "excluded_industry": receipt["counts"]["excluded_industry"],
         }
         for event, (key, row) in zip(result["events"], pairs):
             state = event["state"]
@@ -573,6 +589,7 @@ def _base_receipt(
             "new_events": 0,
             "already_terminal": 0,
             "rejected_parse": 0,
+            "excluded_industry": 0,
             "would_handoff": 0,
         },
     }
@@ -617,8 +634,32 @@ def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
         "pageCount": snapshot.page_count,
         "observations": len(snapshot.observations),
         "rejections": len(snapshot.rejections),
+        "rejectionDetails": [
+            {
+                "company": str(item.get("company", ""))[:200],
+                "reason": str(item.get("reason", ""))[:500],
+            }
+            for item in snapshot.rejections[:100]
+        ],
         "topFundingDate": snapshot.top_funding_date,
     }
+
+
+def _partition_rejections(
+    rejections: tuple[dict[str, str], ...],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    excluded: list[dict[str, str]] = []
+    actionable: list[dict[str, str]] = []
+    for rejection in rejections:
+        target = (
+            excluded
+            if str(rejection.get("reason", "")).startswith(
+                "excluded_industry:"
+            )
+            else actionable
+        )
+        target.append(dict(rejection))
+    return excluded, actionable
 
 
 def _observation_details(row: FundingObservation) -> dict[str, Any]:

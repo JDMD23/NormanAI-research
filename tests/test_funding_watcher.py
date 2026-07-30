@@ -65,12 +65,19 @@ class FakeBrowser:
         self,
         rows: list[FundingObservation],
         *,
-        rejections: int = 0,
+        rejections: int | list[dict[str, str]] = 0,
         result_count: int | None = None,
         error: Exception | None = None,
     ):
         self.rows = rows
-        self.rejections = rejections
+        self.rejections = (
+            [
+                {"company": f"Rejected {index}", "reason": "invalid"}
+                for index in range(rejections)
+            ]
+            if isinstance(rejections, int)
+            else [dict(item) for item in rejections]
+        )
         self.result_count = result_count
         self.error = error
         self.calls: list[int] = []
@@ -88,15 +95,12 @@ class FakeBrowser:
             result_count=(
                 self.result_count
                 if self.result_count is not None
-                else len(self.rows) + self.rejections
+                else len(self.rows) + len(self.rejections)
             ),
             page_count=max_pages,
             top_funding_date=self.rows[0].funding_date if self.rows else None,
             observations=tuple(self.rows),
-            rejections=tuple(
-                {"company": f"Rejected {i}", "reason": "invalid"}
-                for i in range(self.rejections)
-            ),
+            rejections=tuple(self.rejections),
         )
 
 
@@ -499,6 +503,8 @@ def test_bootstrap_handoffs_top_ten_then_baselines_remainder(
         "queued_existing": 0,
         "baselined": 179,
         "already_terminal": 0,
+        "rejected_parse": 0,
+        "excluded_industry": 0,
     }
     assert len(deps.ledger.events) == 189
     assert all(deps.ledger.is_terminal(key) for key in deps.ledger.events)
@@ -840,7 +846,7 @@ def test_truncated_all_new_window_fails_before_core_or_state_mutation(
     assert deps.ledger.events == {}
 
 
-def test_truncated_snapshot_parse_rejection_is_ambiguous_and_fails_closed(
+def test_truncated_snapshot_actionable_rejection_fails_closed(
     tmp_path: Path,
 ) -> None:
     rows = [observation(index) for index in range(99)]
@@ -862,9 +868,119 @@ def test_truncated_snapshot_parse_rejection_is_ambiguous_and_fails_closed(
     )
 
     assert receipt["status"] == "source_drift"
-    assert receipt["stopReason"] == "ambiguous_truncated_snapshot"
+    assert receipt["stopReason"] == "source_rows_rejected"
     assert calls == []
     assert deps.ledger.path.read_bytes() == before
+
+
+def test_complete_snapshot_actionable_rejection_fails_before_core(
+    tmp_path: Path,
+) -> None:
+    requests: list[dict] = []
+    rejection = {"company": "Unreadable", "reason": "missing_company"}
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(
+            [observation(1)],
+            rejections=[rejection],
+        ),
+        invoke=lambda request, write: requests.append(request),
+    )
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "source_rows_rejected"
+    assert receipt["counts"]["rejected_parse"] == 1
+    assert receipt["counts"]["excluded_industry"] == 0
+    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
+    assert requests == []
+    assert deps.ledger.events == {}
+
+
+def test_bootstrap_actionable_rejection_fails_before_handoff_or_baseline(
+    tmp_path: Path,
+) -> None:
+    requests: list[dict] = []
+    rejection = {
+        "company": "Broken URL",
+        "reason": "invalid_crunchbase_url",
+    }
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(
+            [observation(index) for index in range(12)],
+            rejections=[rejection],
+        ),
+        invoke=lambda request, write: requests.append(request),
+        bootstrapped=False,
+    )
+
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=True,
+        now=NOW,
+    )
+
+    assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "source_rows_rejected"
+    assert receipt["counts"]["rejected_parse"] == 1
+    assert receipt["counts"]["excluded_industry"] == 0
+    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
+    assert requests == []
+    assert deps.ledger.events == {}
+    assert not deps.ledger.bootstrap_complete(SOURCE)
+
+
+def test_truncated_snapshot_expected_industry_exclusion_does_not_block_diff(
+    tmp_path: Path,
+) -> None:
+    known, unseen = observation(1), observation(2)
+    rejection = {
+        "company": "Intentional Exclusion",
+        "reason": "excluded_industry:biotechnology",
+    }
+    requests: list[dict] = []
+
+    def invoke(request: dict, write: bool) -> dict:
+        requests.append(request)
+        return core_result(request, write=write)
+
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(
+            [known, unseen],
+            rejections=[rejection],
+            result_count=195,
+        ),
+        invoke=invoke,
+    )
+    _mark_terminal(deps.ledger, known)
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "complete"
+    assert receipt["counts"]["new_events"] == 1
+    assert receipt["counts"]["rejected_parse"] == 0
+    assert receipt["counts"]["excluded_industry"] == 1
+    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
+    assert [event["eventKey"] for event in requests[0]["events"]] == [
+        funding_event_key(unseen)
+    ]
 
 
 def test_truncated_snapshot_requires_new_at_top_sort_before_diff(
