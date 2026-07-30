@@ -49,6 +49,7 @@
 - `tests/test_funding_handoff.py`
 - `tests/test_funding_watcher.py`
 - `tests/test_install_funding_watcher_launch_agent.py`
+- `tests/test_cross_repo_coordination.py` — subprocess proof that both repositories share the default lease and budget.
 
 ### Modify
 
@@ -202,7 +203,6 @@ git commit -m "feat: read approved Crunchbase funding list"
 
 Tests must prove:
 
-- Research default shared paths exactly equal Core’s documented paths;
 - concurrent claims never exceed 25;
 - the detector can reserve at most two pages for one scheduled source;
 - event keys are stable across irrelevant descriptive-field changes;
@@ -236,6 +236,9 @@ Expected: both modules are absent.
 Match Core’s `norman.shared.crunchbase_budget.v1` JSON shape and lock
 algorithm byte-for-byte at the contract level. Change `lib.chrome.lease()` to
 hold `SharedBrowserLease`, translating contention to `ChromeUnavailable`.
+The final acceptance test launches both repositories with an isolated `HOME`
+and their default constructors, proving the exact shared filesystem paths
+through real contention and combined budget consumption.
 
 - [ ] **Step 4: Implement event state and receipts**
 
@@ -605,6 +608,7 @@ git commit -m "docs: define funding watcher operations"
 ### Task 7: Cross-repository acceptance and supervised activation
 
 **Files:**
+- Create: `tests/test_cross_repo_coordination.py`
 - Verify local state and both repositories
 
 **Interfaces:**
@@ -623,7 +627,29 @@ python3 -m pytest -q --rootdir="/Users/normanai/Documents/Core CRM/.worktrees/cr
 
 Expected: both suites pass.
 
-- [ ] **Step 2: Verify the shared fixture contract**
+- [ ] **Step 2: Prove both repositories share the default lease and budget**
+
+Run each repository’s coordination module in a separate subprocess with the
+same isolated `HOME`. The test must:
+
+1. hold Research’s default `SharedBrowserLease`;
+2. prove Core’s default `SharedBrowserLease` reports contention;
+3. let Research reserve 10 pages from its default daily budget;
+4. let Core reserve the remaining 15;
+5. prove a further claim from either repository receives zero;
+6. inspect the resulting file only to confirm the public combined behavior:
+   `used == 25` and both lane totals are present.
+
+Run:
+
+```bash
+python3 -m pytest tests/test_cross_repo_coordination.py -q
+```
+
+Expected: the behavior passes without either subprocess receiving an explicit
+lock or budget path.
+
+- [ ] **Step 3: Verify the shared fixture contract**
 
 Generate a request from Research’s canonical observation fixture and validate
 it with:
@@ -640,7 +666,7 @@ Expected: result schema is `norman.crm_core.funding_handoff_result.v1`, every
 event key matches, and no Notion mutation call occurs in the mocked acceptance
 test.
 
-- [ ] **Step 3: Migrate the real preserved ledger**
+- [ ] **Step 4: Migrate the real preserved ledger**
 
 Run:
 
@@ -652,7 +678,7 @@ Expected receipt: 189 total, 179 baseline, 10 created, one bootstrap, exact
 source URL, and identical sorted-key digest. Confirm the old Core state files’
 hashes and mtimes are unchanged.
 
-- [ ] **Step 4: Run a live read-only source check**
+- [ ] **Step 5: Run a live read-only source check**
 
 Run:
 
@@ -663,7 +689,7 @@ python3 scripts/funding_watcher.py check --dry-run
 Expected: exact source, `NEW AT TOP`, current visible filter contract, complete
 pagination within two pages, and zero repeated top-ten candidates.
 
-- [ ] **Step 5: Preview through real CRM Core**
+- [ ] **Step 6: Preview through real CRM Core**
 
 Run the watcher’s dry-run with Core invocation enabled and confirm:
 
@@ -672,13 +698,13 @@ Run the watcher’s dry-run with Core invocation enabled and confirm:
 - the result contains no writes;
 - canonical Crunchbase profile URLs appear in the receipt.
 
-- [ ] **Step 6: Perform one supervised fixture-only write**
+- [ ] **Step 7: Perform one supervised fixture-only write**
 
 Use a temporary mocked Notion writer with one synthetic new event and one exact
 existing match. Prove one standard Research create, one exact five-property
 queue patch, zero funding-fact writes, and replay creates zero duplicates.
 
-- [ ] **Step 7: Perform one supervised real check**
+- [ ] **Step 8: Perform one supervised real check**
 
 Run:
 
@@ -689,7 +715,7 @@ python3 scripts/funding_watcher.py check --write --yes
 Verify every mutation by canonical Crunchbase identity and compare Research
 event receipts to Core result receipts by `runId` and `eventKey`.
 
-- [ ] **Step 8: Install only from permanent merged checkouts**
+- [ ] **Step 9: Install only from permanent merged checkouts**
 
 After both PRs merge and permanent checkouts are updated:
 
@@ -707,13 +733,13 @@ test ! -e "$HOME/Library/LaunchAgents/com.normanai.crm-core.crunchbase-funding-w
 
 Expected: Research service loaded; Core watcher absent.
 
-- [ ] **Step 9: Audit receipts after the next scheduled slot**
+- [ ] **Step 10: Audit receipts after the next scheduled slot**
 
 Confirm a new immutable Research receipt exists for the correct New York slot,
 page reservations stay at or below two, the shared daily total is at or below
 25, and either zero changes or validated Core terminal results are present.
 
-- [ ] **Step 10: Commit verification-only corrections if needed**
+- [ ] **Step 11: Commit verification-only corrections if needed**
 
 If acceptance exposed a concrete defect, add its regression test first, make
 the smallest correction, rerun both complete suites, and commit with a message

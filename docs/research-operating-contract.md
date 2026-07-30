@@ -199,6 +199,50 @@ The preserved Core ledger is migrated read-only only when it proves 189 events:
 179 baseline and 10 created under one bootstrap source. Research never marks an
 event terminal until it has a validated durable Core result.
 
+A source must complete supervised bootstrap before `check` can reserve budget
+or open Chrome. The check returns `bootstrap_required` with exit 78 otherwise;
+it does not complete the slot. Bootstrap remains the only path allowed to send
+the top `seedTop` rows and baseline the rest.
+
+For a truncated two-page snapshot, a terminal row proves only that the window
+reached known territory. It does not truncate candidate selection: every
+nonterminal valid row in the fetched window is compared and handed off once.
+An actionable parser rejection fails closed before handoff or baseline.
+Intentional `excluded_industry:*` rows remain excluded, but their company and
+reason stay visible in the receipt.
+
+Every watcher outcome atomically replaces `heartbeat.json` beside
+`latest.json`. Configuration failures alert on their first status/reason
+transition; retryable failures alert on the second consecutive occurrence;
+success clears the failure counter. Immutable receipt, latest summary, and
+heartbeat are durable before best-effort notification, and notification
+failure cannot change event state.
+
+Research CI declares an exact compatible Core commit in
+`config/core-compatibility.json`. Its mandatory cross-repository job runs ten
+behavior cases against that checkout with `NORMAN_REQUIRE_CROSS_REPO=1` and
+fails on any skip. A Core-only, read-only SSH deploy key is used only to check
+out that pinned Core commit; checkout does not persist the credential and test
+code receives only the local Core path.
+
+The scheduler is still an activation step, not a consequence of merging this
+code. Do not install or load the LaunchAgent until both repositories are merged
+into permanent checkouts, their required checks pass, and one supervised
+bootstrap/dry-run/write sequence succeeds.
+
+## 10b. Deliberately deferred funding intelligence
+
+The immediate v1 release has one list, filesystem receipts, and deterministic
+event keys. It does not add a second source, evergreen search, reconciliation
+enforcement, canonical-round identity, a journal database, amendment
+heuristics, or automated rule tuning.
+
+Those changes are staged in CRM Core's
+`docs/funding-intelligence-roadmap.md`. Each has an evidence gate. In
+particular, the current two-check window is measured before reconciliation can
+write, and a second list is forbidden until its staggered slots fit inside the
+same ten-check Research allocation in the 40-work-item New York-day ledger.
+
 ## 11. Hard forbidden
 
 - Writing Notion from this repo
