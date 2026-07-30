@@ -34,7 +34,7 @@ jobs:
       - name: Install test deps
         run: pip install pytest
       - name: Run tests
-        run: python3 -m pytest -q
+        run: python3 -m pytest tests/ -q
       - name: Check configs parse
         run: |
           python3 -c "

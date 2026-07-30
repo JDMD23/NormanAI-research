@@ -11,3 +11,4 @@ def test_research_ci_requires_private_core_acceptance_checkout() -> None:
     assert "CRM_CORE_READONLY_DEPLOY_KEY" in text
     assert "NORMAN_REQUIRE_CROSS_REPO: \"1\"" in text
     assert "NORMAN_CRM_CORE_ACCEPTANCE_PATH:" in text
+    assert "python3 -m pytest tests/ -q" in text
