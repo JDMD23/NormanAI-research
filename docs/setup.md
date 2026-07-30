@@ -74,13 +74,28 @@ Before the first supervised run:
 
 ```bash
 python3 scripts/funding_watcher.py migrate-legacy-state
+python3 scripts/funding_watcher.py bootstrap --dry-run
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
 ```
 
 Migration copies the preserved 189-event Core ledger without changing it. The
 first command is idempotent and refuses any count, source, schema, or key
-mismatch.
+mismatch. The migrated ledger already contains the approved source's bootstrap
+marker, so the bootstrap preview must report `already_bootstrapped` without
+claiming budget or opening Chrome.
+
+For a genuinely new monthly source, `check` must report `bootstrap_required`
+until a complete source read has been reviewed and committed:
+
+```bash
+python3 scripts/funding_watcher.py bootstrap --dry-run --seed-top 10
+python3 scripts/funding_watcher.py bootstrap --write --yes --seed-top 10
+python3 scripts/funding_watcher.py check --dry-run
+```
+
+Review all ten proposed handoffs, the baseline count, exclusions, and
+rejections before the bootstrap write.
 
 After both repositories are merged into permanent checkouts and acceptance is
 clean:
