@@ -34,14 +34,6 @@ jobs:
       NORMAN_REQUIRE_CROSS_REPO: "1"
       NORMAN_CRM_CORE_ACCEPTANCE_PATH: ${{ github.workspace }}/core
     steps:
-      - name: Mint read-only Core checkout token
-        id: core-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.NORMANAI_CROSS_REPO_APP_ID }}
-          private-key: ${{ secrets.NORMANAI_CROSS_REPO_APP_PRIVATE_KEY }}
-          owner: JDMD23
-          repositories: NormanAI-crm-core
       - name: Check out Research
         uses: actions/checkout@v4
         with:
@@ -64,9 +56,10 @@ jobs:
         with:
           repository: JDMD23/NormanAI-crm-core
           ref: ${{ steps.core-pin.outputs.sha }}
-          token: ${{ steps.core-token.outputs.token }}
+          ssh-key: ${{ secrets.CRM_CORE_READONLY_DEPLOY_KEY }}
           path: core
           fetch-depth: 0
+          persist-credentials: false
       - name: Prove pinned Core commit is merged
         working-directory: core
         run: |

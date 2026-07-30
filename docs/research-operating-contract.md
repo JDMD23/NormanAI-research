@@ -221,8 +221,9 @@ failure cannot change event state.
 Research CI declares an exact compatible Core commit in
 `config/core-compatibility.json`. Its mandatory cross-repository job runs ten
 behavior cases against that checkout with `NORMAN_REQUIRE_CROSS_REPO=1` and
-fails on any skip. A short-lived GitHub App token is used only to check out
-Core; test code receives no credential.
+fails on any skip. A Core-only, read-only SSH deploy key is used only to check
+out that pinned Core commit; checkout does not persist the credential and test
+code receives only the local Core path.
 
 The scheduler is still an activation step, not a consequence of merging this
 code. Do not install or load the LaunchAgent until both repositories are merged

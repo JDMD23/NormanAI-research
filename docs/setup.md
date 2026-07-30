@@ -104,23 +104,22 @@ commit declared in `config/core-compatibility.json`; when
 `NORMAN_REQUIRE_CROSS_REPO=1`, a missing Core checkout is a test failure rather
 than a skip.
 
-Create an organization-owned GitHub App with access to
-`JDMD23/NormanAI-crm-core` only. Grant it `Contents: Read`; GitHub supplies
-`Metadata: Read` automatically. Give it no write, Actions, pull-request,
-package, or administration permission. Install it only on Core, then configure
-these Research Actions secrets:
+Create an SSH deploy key for `JDMD23/NormanAI-crm-core` and leave **Allow write
+access** disabled. Store the private key as this Research Actions secret:
 
-- `NORMANAI_CROSS_REPO_APP_ID`
-- `NORMANAI_CROSS_REPO_APP_PRIVATE_KEY`
+- `CRM_CORE_READONLY_DEPLOY_KEY`
 
-The workflow mints a short-lived installation token and never passes it to
-test code. The test process receives only the local Core checkout path.
+The workflow uses the key only for the pinned Core checkout, disables
+credential persistence, and never passes it to test code. The test process
+receives only the local Core checkout path. Rotation is manual because deploy
+keys are long-lived: replace the Core public key and Research secret together,
+then rerun the mandatory job before removing the old key.
 
 In Research branch protection, make the
 `cross-repository-acceptance` job a required status check. This repository
-change cannot set organization secrets, install the GitHub App, or change
-branch protection; an administrator must do those three actions before relying
-on the gate. A compatible Core change requires a reviewed update to the pinned
+change cannot create the deploy key, set the secret, or change branch
+protection; an administrator must complete those actions before relying on the
+gate. A compatible Core change requires a reviewed update to the pinned
 40-character commit and the two declared schema versions.
 
 ---
