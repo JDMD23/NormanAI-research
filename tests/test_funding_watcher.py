@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -656,7 +657,7 @@ def _mark_terminal(
     )
 
 
-def test_truncated_new_at_top_snapshot_hands_off_only_prefix_before_anchor_once(
+def test_truncated_snapshot_hands_off_all_unseen_rows_around_anchor_once(
     tmp_path: Path,
 ) -> None:
     rows = [observation(index) for index in range(100)]
@@ -686,27 +687,34 @@ def test_truncated_new_at_top_snapshot_hands_off_only_prefix_before_anchor_once(
     )
 
     assert first["status"] == "complete"
-    assert first["counts"]["new_events"] == 3
+    assert first["counts"]["new_events"] == 99
     assert first["counts"]["already_terminal"] == 1
     assert [event["eventKey"] for event in requests[0]["events"]] == [
-        funding_event_key(row) for row in rows[:3]
+        funding_event_key(row)
+        for index, row in enumerate(rows)
+        if index != 3
     ]
     assert second["status"] == "complete"
     assert second["counts"]["new_events"] == 0
-    assert second["counts"]["already_terminal"] == 1
+    assert second["counts"]["already_terminal"] == 100
     assert len(requests) == 1
-    assert funding_event_key(rows[4]) not in deps.ledger.events
+    assert deps.ledger.is_terminal(funding_event_key(rows[4]))
 
 
-def test_truncated_new_at_top_snapshot_with_first_row_anchor_is_zero_change(
+def test_truncated_snapshot_with_first_row_anchor_hands_off_remaining_rows(
     tmp_path: Path,
 ) -> None:
     rows = [observation(index) for index in range(100)]
-    calls: list[dict] = []
+    requests: list[dict] = []
+
+    def invoke(request: dict, write: bool) -> dict:
+        requests.append(request)
+        return core_result(request, write=write)
+
     deps = dependencies(
         tmp_path,
         FakeBrowser(rows, result_count=195),
-        invoke=lambda request, write: calls.append(request),
+        invoke=invoke,
     )
     _mark_terminal(deps.ledger, rows[0])
 
@@ -719,10 +727,41 @@ def test_truncated_new_at_top_snapshot_with_first_row_anchor_is_zero_change(
     )
 
     assert receipt["status"] == "complete"
-    assert receipt["counts"]["new_events"] == 0
+    assert receipt["counts"]["new_events"] == 99
     assert receipt["counts"]["already_terminal"] == 1
-    assert calls == []
-    assert len(deps.ledger.events) == 1
+    assert [event["eventKey"] for event in requests[0]["events"]] == [
+        funding_event_key(row) for row in rows[1:]
+    ]
+    assert len(deps.ledger.events) == 100
+
+
+def test_truncated_snapshot_hands_off_amended_event_below_anchor(
+    tmp_path: Path,
+) -> None:
+    known = observation(0)
+    amended = replace(
+        known,
+        funding_amount_raw="$11M",
+        funding_amount_minor=1_100_000_000,
+    )
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser([known, amended], result_count=195),
+    )
+    _mark_terminal(deps.ledger, known)
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "complete"
+    assert receipt["counts"]["new_events"] == 1
+    assert receipt["counts"]["already_terminal"] == 1
+    assert deps.ledger.is_terminal(funding_event_key(amended))
 
 
 def test_truncated_all_new_window_fails_before_core_or_state_mutation(

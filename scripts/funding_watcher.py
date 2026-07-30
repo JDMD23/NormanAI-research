@@ -204,8 +204,7 @@ def run_check(
                         "source_drift",
                         "missing_terminal_high_water_anchor",
                     )
-                receipt["counts"]["already_terminal"] += 1
-                rows_to_diff = snapshot.observations[:anchor_index]
+                rows_to_diff = snapshot.observations
             for row in rows_to_diff:
                 key = funding_event_key(row)
                 if dependencies.ledger.is_terminal(key):
