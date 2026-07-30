@@ -34,6 +34,8 @@ def test_cross_repo_ci_uses_core_only_read_only_deploy_key() -> None:
         in core_checkout
     )
     assert "persist-credentials: false" in core_checkout
+    assert "fetch-depth: 0" in core_checkout
+    assert "git fetch origin main" not in workflow_text
     assert "actions/create-github-app-token" not in workflow_text
     assert "NORMANAI_CROSS_REPO_APP_ID" not in workflow_text
     assert "NORMANAI_CROSS_REPO_APP_PRIVATE_KEY" not in workflow_text

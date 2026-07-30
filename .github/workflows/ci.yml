@@ -63,7 +63,7 @@ jobs:
       - name: Prove pinned Core commit is merged
         working-directory: core
         run: |
-          git fetch origin main
+          git show-ref --verify refs/remotes/origin/main
           git merge-base --is-ancestor \
             "${{ steps.core-pin.outputs.sha }}" origin/main
       - uses: actions/setup-python@v5
