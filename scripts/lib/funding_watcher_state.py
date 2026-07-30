@@ -41,10 +41,13 @@ def funding_event_key(observation: FundingObservation) -> str:
     organization_url = _canonical_organization_url(observation.crunchbase_url)
     if not organization_url:
         raise ValueError("funding event requires canonical Crunchbase identity")
+    funding_date = observation.funding_date
     try:
-        datetime.strptime(observation.funding_date, "%Y-%m-%d")
+        parsed_date = datetime.strptime(funding_date, "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
         raise ValueError("funding event date must be YYYY-MM-DD") from exc
+    if parsed_date.strftime("%Y-%m-%d") != funding_date:
+        raise ValueError("funding event date must be YYYY-MM-DD")
     amount = observation.funding_amount_minor
     if (
         not isinstance(amount, int)
@@ -61,7 +64,7 @@ def funding_event_key(observation: FundingObservation) -> str:
     identity = {
         "source_url": source_url,
         "crunchbase_url": organization_url,
-        "funding_date": observation.funding_date,
+        "funding_date": funding_date,
         "funding_type": funding_type,
         "funding_amount_minor": amount,
         "funding_currency": currency,
@@ -147,14 +150,11 @@ class FundingWatcherLedger:
         observed_at: str,
     ) -> None:
         record = self._record(event_key)
-        if record["state"] not in {
-            "observed",
-            "handoff_pending",
-            "retryable",
-        }:
-            raise ValueError("terminal requires an observed event")
         if outcome not in TERMINAL_OUTCOMES:
             raise ValueError("unsupported terminal outcome")
+        required_state = "observed" if outcome == "baseline" else "handoff_pending"
+        if record["state"] != required_state:
+            raise ValueError(f"{outcome} terminal requires {required_state}")
         record.update(
             state="terminal",
             outcome=outcome,
@@ -345,6 +345,7 @@ def migrate_legacy_state(
         },
         "completedSlots": {},
     }
+    _validate_research_ledger(new_payload)
 
     ledger_path = research_root / "ledger.json"
     receipt_path = research_root / "migration-receipt.json"
@@ -353,11 +354,39 @@ def migrate_legacy_state(
             raise RuntimeError("partial Research migration state")
         existing_ledger = _load_json(ledger_path)
         existing_receipt = _load_json(receipt_path)
-        if existing_ledger != new_payload or existing_receipt != receipt:
+        _validate_research_ledger(existing_ledger)
+        migrated_bootstrap = new_payload["bootstraps"][source]
+        migration_event_keys = {
+            key
+            for key, record in existing_ledger["events"].items()
+            if "migration" in record
+        }
+        original_events_match = all(
+            existing_ledger["events"].get(key) == record
+            for key, record in migrated_events.items()
+        )
+        if (
+            existing_receipt != receipt
+            or not original_events_match
+            or migration_event_keys != set(migrated_events)
+            or existing_ledger["bootstraps"].get(source)
+            != migrated_bootstrap
+        ):
             raise RuntimeError("Research migration state does not match legacy")
         return receipt
 
-    research_root.mkdir(parents=True, exist_ok=False)
+    if research_root.exists():
+        raise RuntimeError(
+            "Research migration state directory exists without complete "
+            "migration artifacts"
+        )
+    try:
+        research_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "Research migration state directory exists without complete "
+            "migration artifacts"
+        ) from exc
     try:
         _atomic_write_json(ledger_path, new_payload)
         _atomic_write_json(receipt_path, receipt)
@@ -393,6 +422,137 @@ def _canonical_organization_url(value: str) -> str:
     return f"crunchbase.com/organization/{slug}"
 
 
+def _valid_aware_datetime(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _valid_nonempty_raw_string(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+    )
+
+
+def _valid_event_record(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    state = record.get("state")
+    common = {"state", "observedAt", "details"}
+    if (
+        not isinstance(state, str)
+        or state not in EVENT_STATES
+        or not _valid_aware_datetime(record.get("observedAt"))
+        or not isinstance(record.get("details"), dict)
+    ):
+        return False
+    if state == "observed":
+        return set(record) == common
+
+    pending = common | {"runId", "updatedAt"}
+    if not _valid_aware_datetime(record.get("updatedAt")):
+        return False
+    if state == "handoff_pending":
+        if (
+            not _valid_nonempty_raw_string(record.get("runId"))
+            or set(record) not in (pending, pending | {"reason"})
+        ):
+            return False
+        return (
+            "reason" not in record
+            or _valid_nonempty_raw_string(record["reason"])
+        )
+    if state == "retryable":
+        return (
+            set(record) == pending | {"reason"}
+            and _valid_nonempty_raw_string(record.get("runId"))
+            and _valid_nonempty_raw_string(record.get("reason"))
+        )
+
+    terminal_required = common | {"updatedAt", "outcome", "pageId"}
+    terminal_allowed = terminal_required | {
+        "runId",
+        "reason",
+        "migration",
+    }
+    outcome = record.get("outcome")
+    page_id = record.get("pageId")
+    if (
+        not terminal_required.issubset(record)
+        or not set(record).issubset(terminal_allowed)
+        or not isinstance(outcome, str)
+        or outcome not in TERMINAL_OUTCOMES
+        or (
+            page_id is not None
+            and not _valid_nonempty_raw_string(page_id)
+        )
+        or (
+            "reason" in record
+            and not _valid_nonempty_raw_string(record["reason"])
+        )
+    ):
+        return False
+    migration = record.get("migration")
+    if "migration" in record:
+        if (
+            not isinstance(migration, dict)
+            or set(migration) != {"legacyState"}
+            or not isinstance(migration["legacyState"], str)
+            or migration["legacyState"] not in {"baseline", "created"}
+            or outcome != migration["legacyState"]
+            or "runId" in record
+            or "reason" in record
+        ):
+            return False
+    elif outcome == "baseline":
+        if "runId" in record or "reason" in record:
+            return False
+    elif not _valid_nonempty_raw_string(record.get("runId")):
+        return False
+    if outcome in {"created", "queued_existing"}:
+        return "migration" in record or _valid_nonempty_raw_string(page_id)
+    return page_id is None
+
+
+def _valid_bootstrap(source_url: Any, record: Any) -> bool:
+    if not isinstance(source_url, str):
+        return False
+    try:
+        canonical_source = validate_saved_list_url(source_url)
+    except ValueError:
+        return False
+    return (
+        canonical_source == source_url
+        and isinstance(record, dict)
+        and set(record) in ({"completedAt"}, {"completedAt", "migrated"})
+        and _valid_aware_datetime(record.get("completedAt"))
+        and ("migrated" not in record or record["migrated"] is True)
+    )
+
+
+def _valid_completed_slot(slot: Any, record: Any) -> bool:
+    if not isinstance(slot, str) or not _valid_aware_datetime(slot):
+        return False
+    parsed = datetime.fromisoformat(slot.replace("Z", "+00:00"))
+    expected = parsed.astimezone(NEW_YORK).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+    ).isoformat()
+    return (
+        slot == expected
+        and isinstance(record, dict)
+        and set(record) == {"runId"}
+        and _valid_nonempty_raw_string(record.get("runId"))
+    )
+
+
 def _validate_research_ledger(payload: dict[str, Any]) -> None:
     if set(payload) != {
         "schemaVersion",
@@ -406,11 +566,22 @@ def _validate_research_ledger(payload: dict[str, Any]) -> None:
     )):
         raise RuntimeError("invalid Research funding ledger structure")
     for key, record in payload["events"].items():
-        _require_event_key(key)
-        if not isinstance(record, dict) or record.get("state") not in EVENT_STATES:
-            raise RuntimeError("invalid Research event record")
-        if record["state"] == "terminal" and record.get("outcome") not in TERMINAL_OUTCOMES:
-            raise RuntimeError("invalid Research terminal event")
+        try:
+            _require_event_key(key)
+        except ValueError as exc:
+            raise RuntimeError("invalid Research funding ledger event key") from exc
+        if not _valid_event_record(record):
+            raise RuntimeError("invalid Research funding ledger event record")
+    if any(
+        not _valid_bootstrap(source_url, record)
+        for source_url, record in payload["bootstraps"].items()
+    ):
+        raise RuntimeError("invalid Research funding ledger bootstrap")
+    if any(
+        not _valid_completed_slot(slot, record)
+        for slot, record in payload["completedSlots"].items()
+    ):
+        raise RuntimeError("invalid Research funding ledger completed slot")
 
 
 def _require_event_key(value: str) -> None:

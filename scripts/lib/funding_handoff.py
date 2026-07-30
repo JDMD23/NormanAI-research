@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -24,7 +25,6 @@ TERMINAL_STATES = {
     "rejected_identity",
     "ambiguous_review",
 }
-RETRYABLE_STATES = {"retryable_failure"}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -84,23 +84,26 @@ def write_handoff(path: Path, payload: dict[str, Any]) -> None:
     """Create an immutable canonical handoff request."""
     encoded = _canonical_request_bytes(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+        os.link(temporary_path, path)
+        temporary_path.unlink()
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
         finally:
             os.close(directory)
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def validate_result(
@@ -149,8 +152,8 @@ def validate_result(
         )
         if not all(isinstance(value, str) and value for value in (key, state, reason)):
             raise ValueError("CRM event result strings must be non-empty")
-        if state not in TERMINAL_STATES | RETRYABLE_STATES:
-            raise ValueError("CRM event result state is invalid")
+        if state not in TERMINAL_STATES:
+            raise ValueError("complete CRM event result state must be terminal")
         page_id = event.get("pageId")
         if page_id is not None and (
             not isinstance(page_id, str) or not page_id.strip()
@@ -206,10 +209,7 @@ def invoke_crm_handoff(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("CRM handoff retryable timeout") from exc
     if completed.returncode:
-        detail = (completed.stderr or completed.stdout or "").strip()[:500]
-        raise RuntimeError(
-            f"CRM handoff retryable exit {completed.returncode}: {detail}"
-        )
+        raise RuntimeError(f"CRM handoff retryable exit {completed.returncode}")
     if not result_path.exists():
         raise RuntimeError("CRM handoff retryable missing result")
     result = validate_result(_load_json(result_path), request=request)

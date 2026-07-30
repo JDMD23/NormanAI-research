@@ -164,16 +164,13 @@ def load_watcher_config(path: Path) -> dict[str, Any]:
         "scheduledMaxPagesPerSource",
         "bootstrapMaxPagesPerSource",
         "bootstrapSeedTop",
-        "sharedWorkItemCeiling",
-        "researchDailyCheckLimit",
+        "dailyPageLoadCeiling",
     ):
         _positive_int(payload, key)
     if payload["scheduledMaxPagesPerSource"] > 2:
         raise ValueError("scheduledMaxPagesPerSource must not exceed 2")
-    if payload["sharedWorkItemCeiling"] != 40:
-        raise ValueError("sharedWorkItemCeiling must equal 40")
-    if payload["researchDailyCheckLimit"] != 10:
-        raise ValueError("researchDailyCheckLimit must equal 10")
+    if payload["dailyPageLoadCeiling"] != 25:
+        raise ValueError("dailyPageLoadCeiling must equal 25")
     for key in ("stateDirectory", "legacyStateDirectory", "crmResultSchemaVersion"):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
@@ -383,7 +380,10 @@ const rowElements=Array.from(document.querySelectorAll(".results-container grid-
 const rows=rowElements.map(row=>{const all=cells(row), org=row.querySelector("a[href*='/organization/']"); if(!org)return null; const find=p=>all.find(c=>p.test(c.key)); const date=find(/last_funding_at|last funding date/)||all.find(c=>/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}$/.test(c.text)); const type=find(/last_funding_type|last funding type/); const money=all.filter(c=>/^[\$£€][\d,.]+(?:[KMB])?$/i.test(c.text)); const amount=find(/last_funding_total|last funding amount/)||money.find(c=>all.indexOf(c)>all.indexOf(date)); const total=all.find(c=>/funding_total|total funding/.test(c.key)&&!/last_funding_total|last funding amount/.test(c.key))||money.find(c=>c!==amount); const links=all.flatMap(c=>c.links); return {company:text(org),crunchbaseUrl:org.href,website:links.find(a=>/^https?:\/\//.test(a.href)&&!a.href.includes("crunchbase.com")&&!a.href.includes("linkedin.com"))?.href||"",linkedin:links.find(a=>a.href.includes("linkedin.com"))?.href||"",headquarters:find(/location_identifiers|headquarters/)?.text||all[4]?.text||"",founded:find(/founded_on|founded/)?.text||all[9]?.text||"",description:find(/short_description|description/)?.text||all[5]?.text||"",industries:links.filter(a=>a.href.includes("/categories/")).map(a=>a.text),founders:links.filter(a=>a.href.includes("/person/")).map(a=>a.text),investors:(find(/investor_identifiers|top investors/)?.links||all[18]?.links||[]).filter(a=>a.href.includes("/organization/")).map(a=>a.text),fundingDate:date?.text||"",fundingType:type?.text||"",fundingAmount:amount?.text||"",totalFunding:total?.text||"",numberOfFundingRounds:Number(find(/num_funding_rounds|number of funding rounds/)?.text||all[14]?.text||"")||null}; }).filter(Boolean);
 const livePredicates=Array.from(document.querySelectorAll("predicate")); const filterContainers=livePredicates.length?livePredicates:Array.from(document.querySelectorAll("[data-test*='filter' i],[data-testid*='filter' i],.filter-item,.filter-group"));
 const filters=filterContainers.map(container=>{const field=container.querySelector(".search-field,[aria-label='Last Funding Date'],[aria-label='Last Funding Amount'],label,[data-test*='label' i],[data-testid*='label' i],.filter-label"); const label=field?.getAttribute("aria-label")||text(field); const controls=Array.from(container.querySelectorAll("input,button,[role='combobox'],mat-select")); const input=controls.find(control=>control.tagName==="INPUT"); const operator=text(container.querySelector(".mat-mdc-select-min-line"))||controls.map(control=>text(control)||control.getAttribute("aria-label")||"").find(value=>/after|before|greater than|at least|>=|</i.test(value))||""; let value=input?.value||""; if(label==="Last Funding Amount"&&/^[\d,.]+$/.test(value))value="$"+value; return {label,operator,value};}).filter(filter=>filter.label);
-const next=document.querySelector(".page-button-next"); return JSON.stringify({pageUrl:location.href,pageTitle:document.title,readyState:document.readyState,gridRowCount:rowElements.length,pageText:bodyText.slice(0,12000),captchaDetected:Boolean(document.querySelector('#px-captcha,iframe[src*="captcha" i],iframe[src*="recaptcha" i],iframe[src*="hcaptcha" i],[class*="captcha" i],[id*="captcha" i],[data-sitekey]')),securityChallengeDetected:Boolean(document.querySelector('#challenge-form,#cf-challenge-running,[id^="cf-chl-"],[class*="cf-chl-"],script[src*="/cdn-cgi/challenge-platform/"],script[src*="perimeterx"]')),title:text(document.querySelector("[data-test='saved-search-name'],[data-testid='saved-search-name'],h1")),resultType:bodyText.match(/\b(Companies)\b/)?.[1]||"",newAtTop:bodyText.includes("NEW AT TOP"),filters,resultCount:Number(bodyText.match(/(?:of\s+)?([\d,]+)\s+results/i)?.[1]?.replace(/,/g,"")||0),hasNext:Boolean(next&&!next.className.includes("disabled")&&!next.className.includes("no-events")),rows}); })()'''
+const resultTypeControl=document.querySelector("[data-test='result-type'],[data-testid='result-type'],[aria-label='Result type'],[aria-label='Search type'],[role='tablist'][aria-label*='result' i] [role='tab'][aria-selected='true']");
+const sortControl=document.querySelector("[data-test='sort-order'],[data-testid='sort-order'],[aria-label='Sort order'],[aria-label='Sort'],[data-test*='sort' i] [aria-selected='true'],[data-testid*='sort' i] [aria-selected='true']");
+const controlText=control=>(text(control)||control?.getAttribute("aria-label")||"").replace(/\s+/g," ").trim();
+const next=document.querySelector(".page-button-next"); return JSON.stringify({pageUrl:location.href,pageTitle:document.title,readyState:document.readyState,gridRowCount:rowElements.length,pageText:bodyText.slice(0,12000),captchaDetected:Boolean(document.querySelector('#px-captcha,iframe[src*="captcha" i],iframe[src*="recaptcha" i],iframe[src*="hcaptcha" i],[class*="captcha" i],[id*="captcha" i],[data-sitekey]')),securityChallengeDetected:Boolean(document.querySelector('#challenge-form,#cf-challenge-running,[id^="cf-chl-"],[class*="cf-chl-"],script[src*="/cdn-cgi/challenge-platform/"],script[src*="perimeterx"]')),title:text(document.querySelector("[data-test='saved-search-name'],[data-testid='saved-search-name'],h1")),resultType:controlText(resultTypeControl),newAtTop:controlText(sortControl).toUpperCase()==="NEW AT TOP",filters,resultCount:Number(bodyText.match(/(?:of\s+)?([\d,]+)\s+results/i)?.[1]?.replace(/,/g,"")||0),hasNext:Boolean(next&&!next.className.includes("disabled")&&!next.className.includes("no-events")),rows}); })()'''
 
 
 def _tab_ref(value: str) -> tuple[int, str]:
@@ -487,7 +487,10 @@ class CrunchbaseSavedListBrowser:
                 try: snapshots.append(parse_saved_list_snapshot(payload, source, observed_at))
                 except RuntimeError as exc: raise CrunchbaseSavedListDrift(str(exc)) from exc
                 if not payload.get("hasNext") or page_number + 1 >= max_pages: break
-                if not self.transport.advance_to_next_page(tab_ref): break
+                if not self.transport.advance_to_next_page(tab_ref):
+                    raise CrunchbaseSavedListDrift(
+                        "saved-list promised a next page but pagination was unavailable"
+                    )
             failed = False
         finally:
             if tab_ref is not None:

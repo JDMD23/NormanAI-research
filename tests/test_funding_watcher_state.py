@@ -129,11 +129,23 @@ def test_event_key_matches_the_canonical_core_contract_fixture() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "funding_date",
+    ["2026-7-9", "2026-07-9", "2026-7-09"],
+)
+def test_event_key_rejects_noncanonical_iso_dates(funding_date: str) -> None:
+    """Catches relaxed date text producing a different hash for the same day."""
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        funding_event_key(observation(funding_date=funding_date))
+
+
 def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     tmp_path: Path,
 ) -> None:
+    """Catches transitions that exist only in memory or mark retries terminal."""
     event_key = hashlib.sha256(b"event").hexdigest()
-    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    path = tmp_path / "ledger.json"
+    ledger = FundingWatcherLedger(path)
     ledger.observe(event_key, observed_at="2026-07-29T14:00:00+00:00")
     ledger.mark_handoff_pending(
         event_key, run_id="run-1", observed_at="2026-07-29T14:01:00+00:00"
@@ -141,6 +153,8 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
     ledger.mark_retryable(
         event_key, reason="timeout", observed_at="2026-07-29T14:02:00+00:00"
     )
+    ledger = FundingWatcherLedger(path)
+    assert ledger.events[event_key]["state"] == "retryable"
     assert not ledger.is_terminal(event_key)
     ledger.mark_handoff_pending(
         event_key, run_id="run-2", observed_at="2026-07-29T14:03:00+00:00"
@@ -151,12 +165,67 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
         page_id="page-1",
         observed_at="2026-07-29T14:04:00+00:00",
     )
+    ledger = FundingWatcherLedger(path)
+    assert ledger.events[event_key]["state"] == "terminal"
     assert ledger.is_terminal(event_key)
 
     with pytest.raises(ValueError, match="terminal"):
         ledger.mark_retryable(
             event_key, reason="late", observed_at="2026-07-29T14:05:00+00:00"
         )
+
+
+def test_nonbaseline_terminal_outcomes_require_handoff_pending(
+    tmp_path: Path,
+) -> None:
+    """Catches observed/retryable events bypassing the CRM handoff boundary."""
+    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    observed_key = hashlib.sha256(b"observed-direct-terminal").hexdigest()
+    retryable_key = hashlib.sha256(b"retryable-direct-terminal").hexdigest()
+
+    ledger.observe(observed_key, observed_at="2026-07-29T14:00:00+00:00")
+    with pytest.raises(ValueError, match="handoff_pending"):
+        ledger.mark_terminal(
+            observed_key,
+            outcome="created",
+            page_id="page-observed",
+            observed_at="2026-07-29T14:01:00+00:00",
+        )
+
+    ledger.observe(retryable_key, observed_at="2026-07-29T14:00:00+00:00")
+    ledger.mark_handoff_pending(
+        retryable_key,
+        run_id="run-1",
+        observed_at="2026-07-29T14:01:00+00:00",
+    )
+    ledger.mark_retryable(
+        retryable_key,
+        reason="timeout",
+        observed_at="2026-07-29T14:02:00+00:00",
+    )
+    with pytest.raises(ValueError, match="handoff_pending"):
+        ledger.mark_terminal(
+            retryable_key,
+            outcome="created",
+            page_id="page-retryable",
+            observed_at="2026-07-29T14:03:00+00:00",
+        )
+
+
+def test_baseline_terminal_allows_the_explicit_observed_bootstrap_path(
+    tmp_path: Path,
+) -> None:
+    """Protects bootstrap baselining while tightening handoff outcomes."""
+    ledger = FundingWatcherLedger(tmp_path / "ledger.json")
+    event_key = hashlib.sha256(b"bootstrap-baseline").hexdigest()
+    ledger.observe(event_key, observed_at="2026-07-29T14:00:00+00:00")
+    ledger.mark_terminal(
+        event_key,
+        outcome="baseline",
+        page_id=None,
+        observed_at="2026-07-29T14:01:00+00:00",
+    )
+    assert ledger.is_terminal(event_key)
 
 
 def test_invalid_lifecycle_transition_is_rejected(tmp_path: Path) -> None:
@@ -169,8 +238,10 @@ def test_invalid_lifecycle_transition_is_rejected(tmp_path: Path) -> None:
 
 
 def test_immutable_receipt_refuses_overwrite(tmp_path: Path) -> None:
+    """Catches receipts moving outside receipts/<runId>.json or overwriting."""
     payload = {"runId": "20260729T140000Z", "status": "complete"}
     receipt = write_immutable_receipt(tmp_path, payload)
+    assert receipt == tmp_path / "receipts" / "20260729T140000Z.json"
     assert json.loads(receipt.read_text(encoding="utf-8")) == payload
     with pytest.raises(FileExistsError):
         write_immutable_receipt(tmp_path, payload)
@@ -192,6 +263,7 @@ def test_new_york_slot_normalizes_timezone() -> None:
 
 
 def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
+    """Catches legacy mutation, key loss, or incomplete migration receipts."""
     legacy = tmp_path / "legacy"
     research = tmp_path / "research"
     legacy.mkdir()
@@ -199,7 +271,16 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     legacy_path.write_text(
         json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
     )
-    before = legacy_path.read_bytes()
+    legacy_note = legacy / "operator-note.txt"
+    legacy_note.write_text("leave this file alone\n", encoding="utf-8")
+    before = {
+        path.relative_to(legacy): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(legacy.rglob("*"))
+        if path.is_file()
+    }
 
     first = migrate_legacy_state(
         legacy, research, expected_source_url=SOURCE
@@ -209,7 +290,29 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     )
 
     assert first == second
-    assert legacy_path.read_bytes() == before
+    assert {
+        path.relative_to(legacy): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(legacy.rglob("*"))
+        if path.is_file()
+    } == before
+    assert first == {
+        "schemaVersion": "norman.research.funding_legacy_migration.v1",
+        "legacyPath": str(legacy_path),
+        "researchPath": str(research / "ledger.json"),
+        "sourceUrl": SOURCE,
+        "counts": {
+            "events": 189,
+            "baseline": 179,
+            "created": 10,
+            "bootstraps": 1,
+        },
+        "eventKeyDigest": (
+            "e314bbac273ab87ed46962916b35827ec50f52c78be9b81b90b4c65042c074ad"
+        ),
+    }
     assert first["counts"] == {
         "events": 189,
         "baseline": 179,
@@ -220,6 +323,303 @@ def test_migration_is_read_only_exact_and_idempotent(tmp_path: Path) -> None:
     assert set(migrated.events) == set(_legacy_payload()["events"])
     assert sum(migrated.is_terminal(key) for key in migrated.events) == 189
     assert (research / "migration-receipt.json").exists()
+
+
+def test_migration_idempotency_preserves_valid_post_migration_evolution(
+    tmp_path: Path,
+) -> None:
+    """Catches pristine-payload equality rejecting later watcher state."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    receipt = migrate_legacy_state(
+        legacy, research, expected_source_url=SOURCE
+    )
+
+    ledger = FundingWatcherLedger(research / "ledger.json")
+    added_key = hashlib.sha256(b"post-migration-event").hexdigest()
+    evolved_at = "2026-07-29T18:05:00+00:00"
+    ledger.observe(
+        added_key,
+        observed_at=evolved_at,
+        details={
+            "company": "Post Migration Co",
+            "source_url": SOURCE,
+        },
+    )
+    ledger.mark_handoff_pending(
+        added_key,
+        run_id="20260729T180500Z",
+        observed_at=evolved_at,
+    )
+    ledger.mark_terminal(
+        added_key,
+        outcome="queued_existing",
+        page_id="post-migration-page",
+        observed_at=evolved_at,
+    )
+    ledger.mark_slot_complete(
+        "2026-07-29T13:00:00-04:00",
+        run_id="20260729T180500Z",
+    )
+    before = {
+        path.relative_to(research): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(research.rglob("*"))
+        if path.is_file()
+    }
+
+    assert migrate_legacy_state(
+        legacy, research, expected_source_url=SOURCE
+    ) == receipt
+    assert {
+        path.relative_to(research): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mtimeNs": path.stat().st_mtime_ns,
+        }
+        for path in sorted(research.rglob("*"))
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["events"].update(
+            {
+                hashlib.sha256(b"malformed-later-event").hexdigest(): {
+                    "state": "terminal",
+                    "outcome": "created",
+                }
+            }
+        ),
+        lambda payload: payload["bootstraps"].update(
+            {"not-a-url": []}
+        ),
+        lambda payload: payload["completedSlots"].update(
+            {"not-a-slot": "not-a-record"}
+        ),
+    ],
+    ids=[
+        "shallow-terminal-event",
+        "non-url-bootstrap-list",
+        "non-slot-string",
+    ],
+)
+def test_migration_rejects_malformed_post_migration_evolution(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    """Catches migration accepting additions the shared ledger cannot own."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger_path = research / "ledger.json"
+    payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    ledger_path.write_text(
+        json.dumps(payload, sort_keys=True), encoding="utf-8"
+    )
+    before = {
+        "sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "mtimeNs": ledger_path.stat().st_mtime_ns,
+    }
+
+    with pytest.raises(RuntimeError, match="Research funding ledger"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert {
+        "sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "mtimeNs": ledger_path.stat().st_mtime_ns,
+    } == before
+
+
+def test_migration_rejects_later_event_claiming_legacy_provenance(
+    tmp_path: Path,
+) -> None:
+    """Catches a valid-looking later event joining the migrated key set."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger_path = research / "ledger.json"
+    payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    payload["events"][
+        hashlib.sha256(b"later-event-with-migration").hexdigest()
+    ] = {
+        "state": "terminal",
+        "outcome": "created",
+        "pageId": "later-page",
+        "observedAt": "2026-07-29T18:05:00+00:00",
+        "updatedAt": "2026-07-29T18:05:00+00:00",
+        "details": {"company": "Later Co", "source_url": SOURCE},
+        "migration": {"legacyState": "created"},
+    }
+    ledger_path.write_text(
+        json.dumps(payload, sort_keys=True), encoding="utf-8"
+    )
+    before = ledger_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="migration state"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert ledger_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pendingRunId", ""),
+        ("pendingRunId", " "),
+        ("pendingRunId", " padded-run "),
+        ("retryableRunId", ""),
+        ("retryableRunId", " padded-run "),
+        ("terminalRunId", " "),
+        ("terminalRunId", " padded-run "),
+        ("slotRunId", ""),
+        ("slotRunId", " padded-run "),
+        ("pageId", ""),
+        ("pageId", " "),
+        ("pageId", " padded-page "),
+        ("retryableReason", ""),
+        ("retryableReason", " "),
+        ("retryableReason", " padded reason "),
+    ],
+)
+def test_migration_rejects_nonexact_runtime_identifiers_and_retry_reason(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """Catches truthiness-only checks accepting noncanonical raw fields."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    (legacy / "ledger.json").write_text(
+        json.dumps(_legacy_payload(), sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger = FundingWatcherLedger(research / "ledger.json")
+    observed_at = "2026-07-29T18:05:00+00:00"
+    pending_key = hashlib.sha256(b"later-pending").hexdigest()
+    retryable_key = hashlib.sha256(b"later-retryable").hexdigest()
+    terminal_key = hashlib.sha256(b"later-terminal").hexdigest()
+    for key in (pending_key, retryable_key, terminal_key):
+        ledger.observe(key, observed_at=observed_at, details={"company": "Later"})
+        ledger.mark_handoff_pending(
+            key, run_id="valid-run", observed_at=observed_at
+        )
+    ledger.mark_retryable(
+        retryable_key, reason="valid reason", observed_at=observed_at
+    )
+    ledger.mark_terminal(
+        terminal_key,
+        outcome="queued_existing",
+        page_id="valid-page",
+        observed_at=observed_at,
+    )
+    slot = "2026-07-29T13:00:00-04:00"
+    ledger.mark_slot_complete(slot, run_id="valid-run")
+    payload = json.loads(ledger.path.read_text(encoding="utf-8"))
+    targets = {
+        "pendingRunId": (payload["events"][pending_key], "runId"),
+        "retryableRunId": (payload["events"][retryable_key], "runId"),
+        "terminalRunId": (payload["events"][terminal_key], "runId"),
+        "slotRunId": (payload["completedSlots"][slot], "runId"),
+        "pageId": (payload["events"][terminal_key], "pageId"),
+        "retryableReason": (payload["events"][retryable_key], "reason"),
+    }
+    target, key = targets[field]
+    target[key] = value
+    ledger.path.write_text(
+        json.dumps(payload, sort_keys=True), encoding="utf-8"
+    )
+    before = ledger.path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="Research funding ledger"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert ledger.path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda ledger, receipt, original_key: ledger["events"][
+            original_key
+        ]["details"].update(company="Changed"),
+        lambda ledger, receipt, original_key: ledger["events"].pop(
+            original_key
+        ),
+        lambda ledger, receipt, original_key: ledger["bootstraps"][
+            SOURCE
+        ].update(completedAt="2026-07-29T12:07:04+00:00"),
+        lambda ledger, receipt, original_key: receipt["counts"].update(
+            events=188
+        ),
+    ],
+    ids=[
+        "altered-original-event",
+        "missing-original-event",
+        "changed-original-bootstrap",
+        "changed-receipt",
+    ],
+)
+def test_migration_existing_artifacts_reject_original_state_or_receipt_drift(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    """Catches subset compatibility weakening immutable migration evidence."""
+    legacy = tmp_path / "legacy"
+    research = tmp_path / "research"
+    legacy.mkdir()
+    legacy_payload = _legacy_payload()
+    (legacy / "ledger.json").write_text(
+        json.dumps(legacy_payload, sort_keys=True), encoding="utf-8"
+    )
+    migrate_legacy_state(legacy, research, expected_source_url=SOURCE)
+    ledger_path = research / "ledger.json"
+    receipt_path = research / "migration-receipt.json"
+    ledger_payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    original_key = next(iter(legacy_payload["events"]))
+    mutate(ledger_payload, receipt_payload, original_key)
+    ledger_path.write_text(
+        json.dumps(ledger_payload, sort_keys=True), encoding="utf-8"
+    )
+    receipt_path.write_text(
+        json.dumps(receipt_payload, sort_keys=True), encoding="utf-8"
+    )
+    before = {
+        "ledger": ledger_path.read_bytes(),
+        "receipt": receipt_path.read_bytes(),
+    }
+
+    with pytest.raises(RuntimeError, match="migration state"):
+        migrate_legacy_state(
+            legacy, research, expected_source_url=SOURCE
+        )
+
+    assert ledger_path.read_bytes() == before["ledger"]
+    assert receipt_path.read_bytes() == before["receipt"]
 
 
 def test_migration_accepts_legacy_created_rows_without_repeated_source(
@@ -257,6 +657,11 @@ def test_migration_accepts_legacy_created_rows_without_repeated_source(
         lambda payload: payload["bootstraps"].update(
             {"https://www.crunchbase.com/discover/saved/other/id": {}}
         ),
+        lambda payload: next(
+            record
+            for record in payload["events"].values()
+            if record["state"] == "created"
+        ).update(state="baseline"),
         lambda payload: next(iter(payload["events"].values()))["details"].update(
             source_url=SOURCE.replace("main-funding", "other-funding")
         ),
@@ -268,6 +673,7 @@ def test_migration_accepts_legacy_created_rows_without_repeated_source(
 def test_migration_mismatch_aborts_before_writing(
     tmp_path: Path, mutate
 ) -> None:
+    """Catches validation that writes before rejecting malformed legacy state."""
     legacy = tmp_path / "legacy"
     research = tmp_path / "research"
     legacy.mkdir()

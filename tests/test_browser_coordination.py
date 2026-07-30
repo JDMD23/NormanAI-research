@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import multiprocessing
-import tempfile
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from lib import chrome
 from lib.browser_coordination import (
+    BrowserLeaseUnavailable,
     DEFAULT_BROWSER_LOCK,
     DEFAULT_CRUNCHBASE_BUDGET,
     DailyCrunchbaseBudget,
@@ -20,13 +22,26 @@ from lib.browser_coordination import (
 NEW_YORK = ZoneInfo("America/New_York")
 
 
-def _claim(args: tuple[str, str]) -> int:
-    path, lane = args
+def _claim(path: str) -> int:
     return DailyCrunchbaseBudget(Path(path)).claim(
         datetime(2026, 7, 29, 10, tzinfo=NEW_YORK),
         requested=2,
-        lane=lane,
+        lane=f"worker-{os.getpid()}",
     )
+
+
+def _claim_watcher_slot(path: str) -> int:
+    return DailyCrunchbaseBudget(Path(path)).claim(
+        datetime(2026, 7, 29, 10, 30, tzinfo=NEW_YORK),
+        requested=2,
+        lane="research-funding-watcher",
+    )
+
+
+def test_default_shared_paths_match_the_cross_repository_contract() -> None:
+    root = Path.home() / "Library/Application Support/NormanAI/shared"
+    assert DEFAULT_BROWSER_LOCK == root / "browser.lock"
+    assert DEFAULT_CRUNCHBASE_BUDGET == root / "crunchbase-budget.json"
 
 
 def test_default_shared_paths_resolve_from_injected_root(
@@ -55,62 +70,60 @@ def test_shared_browser_lease_is_nonblocking_and_mode_0600(tmp_path: Path) -> No
                 pass
 
 
-def test_concurrent_budget_claims_never_exceed_40(tmp_path: Path) -> None:
+def test_chrome_lease_translates_shared_contention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches Chrome reverting to a private lock or leaking protocol errors."""
+    lock = tmp_path / "browser.lock"
+    monkeypatch.setattr(
+        chrome, "SharedBrowserLease", lambda: SharedBrowserLease(lock)
+    )
+
+    with SharedBrowserLease(lock):
+        with pytest.raises(chrome.ChromeUnavailable) as caught:
+            with chrome.lease():
+                pass
+
+    assert isinstance(caught.value.__cause__, BrowserLeaseUnavailable)
+
+
+def test_concurrent_budget_claims_never_exceed_25(tmp_path: Path) -> None:
     path = tmp_path / "budget.json"
     context = multiprocessing.get_context("fork")
     with context.Pool(20) as pool:
-        args = [
-            (str(path), "crm_crunchbase")
-            for _index in range(15)
-        ] + [
-            (str(path), "research-funding-watcher")
-            for _index in range(5)
+        results = [
+            pool.apply_async(_claim, (str(path),))
+            for _ in range(20)
         ]
-        results = [pool.apply_async(_claim, (item,)) for item in args]
         grants = [result.get(timeout=10) for result in results]
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert sum(grants) == 40
-    assert payload["used"] == 40
-    assert sum(payload["lanes"].values()) == 40
+    assert sum(grants) == 25
+    assert payload["used"] == 25
+    assert sum(payload["lanes"].values()) == 25
 
 
-def test_core_and_research_daily_allocations_are_atomic(
-    tmp_path: Path,
-) -> None:
-    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
-    now = datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
+def test_budget_persists_the_shared_core_json_contract(tmp_path: Path) -> None:
+    """Catches schema drift that would make Core and Research misread state."""
+    path = tmp_path / "budget.json"
+    budget = DailyCrunchbaseBudget(path)
+    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
 
-    assert budget.claim(now, requested=30, lane="crm_crunchbase") == 30
-    assert budget.claim(now, requested=1, lane="crm_crunchbase") == 0
-    for _index in range(4):
-        assert (
-            budget.claim(
-                now,
-                requested=2,
-                lane="research-funding-watcher",
-            )
-            == 2
-        )
-    assert (
-        budget.claim(
-            now,
-            requested=6,
-            lane="research-funding-bootstrap",
-        )
-        == 2
-    )
-
-
-def test_unknown_lane_is_rejected(tmp_path: Path) -> None:
-    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
-
-    with pytest.raises(ValueError, match="unapproved Crunchbase lane"):
-        budget.claim(
-            datetime(2026, 7, 30, 10, tzinfo=NEW_YORK),
-            requested=1,
-            lane="typo-lane",
-        )
+    assert budget.claim(now, requested=2, lane="research-funding-watcher") == 2
+    assert budget.claim(now, requested=3, lane="crm-core") == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-29",
+        "ceiling": 25,
+        "used": 5,
+        "lanes": {
+            "crm-core": 3,
+            (
+                "research-funding-watcher"
+                "@2026-07-29T10:00:00-04:00"
+            ): 2,
+        },
+    }
 
 
 def test_detector_can_reserve_no_more_than_two_pages_per_source(
@@ -124,16 +137,39 @@ def test_detector_can_reserve_no_more_than_two_pages_per_source(
     assert budget.claim(now, requested=2, lane="research-funding-watcher") == 2
 
 
+def test_detector_reservations_are_capped_per_new_york_slot_across_processes(
+    tmp_path: Path,
+) -> None:
+    """Catches repeated claims accumulating beyond two pages in one slot."""
+    path = tmp_path / "budget.json"
+    context = multiprocessing.get_context("fork")
+    with context.Pool(4) as pool:
+        grants = [
+            result.get(timeout=10)
+            for result in [
+                pool.apply_async(_claim_watcher_slot, (str(path),))
+                for _ in range(4)
+            ]
+        ]
+
+    budget = DailyCrunchbaseBudget(path)
+    next_slot = datetime(2026, 7, 29, 13, 5, tzinfo=NEW_YORK)
+    assert sum(grants) == 2
+    assert budget.claim(
+        next_slot, requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.snapshot(next_slot)["lanes"] == {
+        "research-funding-watcher@2026-07-29T10:00:00-04:00": 2,
+        "research-funding-watcher@2026-07-29T13:00:00-04:00": 2,
+    }
+
+
 def test_exact_claim_never_partially_consumes_remaining_capacity(
     tmp_path: Path,
 ) -> None:
     budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
-    now = datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
-    assert budget.claim(
-        now,
-        requested=9,
-        lane="research-funding-bootstrap",
-    ) == 9
+    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+    assert budget.claim(now, requested=24, lane="core-fill") == 24
 
     assert budget.claim(
         now,
@@ -141,7 +177,19 @@ def test_exact_claim_never_partially_consumes_remaining_capacity(
         lane="research-funding-watcher",
         exact=True,
     ) == 0
-    assert budget.snapshot(now)["used"] == 9
+    assert budget.snapshot(now)["used"] == 24
+
+
+def test_exact_flag_must_be_boolean(tmp_path: Path) -> None:
+    budget = DailyCrunchbaseBudget(tmp_path / "budget.json")
+
+    with pytest.raises(ValueError, match="exact must be boolean"):
+        budget.claim(
+            datetime(2026, 7, 29, 10, tzinfo=NEW_YORK),
+            requested=1,
+            lane="research-funding-watcher",
+            exact=1,
+        )
 
 
 def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
@@ -149,62 +197,10 @@ def test_budget_resets_on_the_new_york_date(tmp_path: Path) -> None:
     first = datetime(2026, 7, 29, 23, 59, tzinfo=NEW_YORK)
     second = datetime(2026, 7, 30, 0, 1, tzinfo=NEW_YORK)
     assert budget.claim(first, requested=2, lane="research-funding-watcher") == 2
-    rolled = budget.snapshot(second)
-    assert rolled["used"] == 0
-    assert rolled["ceiling"] == 40
-    assert rolled["schemaVersion"] == "norman.shared.crunchbase_budget.v3"
-
-
-def test_legacy_25_page_budget_is_honored_until_new_york_midnight(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "budget.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": "norman.shared.crunchbase_budget.v1",
-                "date": "2026-07-29",
-                "ceiling": 25,
-                "used": 24,
-                "lanes": {"crm_crunchbase": 24},
-            }
-        ),
-        encoding="utf-8",
-    )
-    budget = DailyCrunchbaseBudget(path)
-    now = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
-
-    assert budget.claim(
-        now,
-        requested=2,
-        lane="research-funding-watcher",
-    ) == 1
-
-
-def test_v2_page_ledger_rolls_to_v3_work_items(tmp_path: Path) -> None:
-    path = tmp_path / "budget.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": "norman.shared.crunchbase_budget.v2",
-                "date": "2026-07-29",
-                "ceiling": 40,
-                "used": 15,
-                "lanes": {"crm_crunchbase": 15},
-            }
-        ),
-        encoding="utf-8",
-    )
-    budget = DailyCrunchbaseBudget(path)
-
-    rolled = budget.snapshot(
-        datetime(2026, 7, 30, 0, 1, tzinfo=NEW_YORK)
-    )
-
-    assert rolled == {
-        "schemaVersion": "norman.shared.crunchbase_budget.v3",
+    assert budget.snapshot(second) == {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
         "date": "2026-07-30",
-        "ceiling": 40,
+        "ceiling": 25,
         "used": 0,
         "lanes": {},
     }
@@ -213,31 +209,61 @@ def test_v2_page_ledger_rolls_to_v3_work_items(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"foo": 1},
         {
-            "schemaVersion": "norman.shared.crunchbase_budget.v3",
-            "date": "not-a-date",
-            "ceiling": 40,
-            "used": 0,
-            "lanes": {},
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm-core": 24},
         },
         {
-            "schemaVersion": "norman.shared.crunchbase_budget.v3",
-            "date": "2026-07-31",
-            "ceiling": 40,
-            "used": 0,
-            "lanes": {},
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "2026-07-28",
+            "ceiling": 26,
+            "used": 25,
+            "lanes": {"crm-core": 25},
+        },
+        {
+            "schemaVersion": "norman.shared.crunchbase_budget.v1",
+            "date": "not-a-date",
+            "ceiling": 25,
+            "used": 25,
+            "lanes": {"crm-core": 25},
         },
     ],
 )
-def test_invalid_or_future_ledgers_fail_closed(
+def test_corrupt_prior_day_budget_fails_closed_without_rewrite(
     tmp_path: Path,
     payload: dict,
 ) -> None:
+    """A date change must not reopen allowance before validating old state."""
     path = tmp_path / "budget.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
 
-    with pytest.raises(RuntimeError):
-        DailyCrunchbaseBudget(path).snapshot(
-            datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
-        )
+    with pytest.raises(RuntimeError, match="shared Crunchbase budget"):
+        budget.claim(today, requested=1, lane="research-funding-watcher")
+
+    assert path.read_text(encoding="utf-8") == serialized
+
+
+def test_future_dated_budget_fails_closed_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "budget.json"
+    payload = {
+        "schemaVersion": "norman.shared.crunchbase_budget.v1",
+        "date": "2026-07-30",
+        "ceiling": 25,
+        "used": 25,
+        "lanes": {"crm-core": 25},
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    budget = DailyCrunchbaseBudget(path)
+    today = datetime(2026, 7, 29, 10, tzinfo=NEW_YORK)
+
+    with pytest.raises(RuntimeError, match="future-dated"):
+        budget.snapshot(today)
+
+    assert path.read_text(encoding="utf-8") == serialized

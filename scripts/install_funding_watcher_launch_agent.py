@@ -9,9 +9,11 @@ import os
 import plistlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +31,7 @@ from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
 LABEL = "com.normanai.research.crunchbase-funding-watcher"
 CORE_LABEL = "com.normanai.crm-core.crunchbase-funding-watcher"
 WATCHER_RELATIVE_PATH = Path("scripts/funding_watcher.py")
+CORE_HANDOFF_RELATIVE_PATH = Path("scripts/crm_funding_handoff.py")
 SCHEDULE = (
     {"Hour": 6, "Minute": 0},
     {"Hour": 10, "Minute": 0},
@@ -50,7 +53,7 @@ def render_plist(
     root = repo_root.resolve()
     command = shlex.join(
         [
-            str(python.resolve()),
+            str(python),
             str(root / WATCHER_RELATIVE_PATH),
             "check",
             "--write",
@@ -103,7 +106,11 @@ def _loaded(runner: Runner, uid: int) -> bool:
     )
 
 
-def _tracked(runner: Runner, root: Path) -> bool:
+def _tracked(
+    runner: Runner,
+    root: Path,
+    relative_path: Path,
+) -> bool:
     result = _run(
         runner,
         [
@@ -112,7 +119,7 @@ def _tracked(runner: Runner, root: Path) -> bool:
             str(root),
             "ls-files",
             "--error-unmatch",
-            WATCHER_RELATIVE_PATH.as_posix(),
+            relative_path.as_posix(),
         ],
     )
     return result.returncode == 0
@@ -132,6 +139,38 @@ def _permanent(path: Path) -> bool:
     return ".worktrees" not in path.resolve().parts
 
 
+def _path_from_selected_home(value: Any, home: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Research funding state directory is not configured")
+    if value == "~":
+        return home.resolve()
+    if value.startswith("~/"):
+        return (home / value[2:]).resolve()
+    path = Path(value)
+    if not path.is_absolute() or value.startswith("~"):
+        raise RuntimeError("Research funding state directory must be absolute")
+    return path.resolve()
+
+
+def _bootstrap_complete(ledger: FundingWatcherLedger, source_url: str) -> bool:
+    record = ledger.bootstraps.get(source_url)
+    if not isinstance(record, dict) or set(record) not in (
+        {"completedAt"},
+        {"completedAt", "migrated"},
+    ):
+        return False
+    if "migrated" in record and record["migrated"] is not True:
+        return False
+    completed_at = record.get("completedAt")
+    if not isinstance(completed_at, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _prerequisites(
     *,
     repo_root: Path,
@@ -142,7 +181,9 @@ def _prerequisites(
     watcher = root / WATCHER_RELATIVE_PATH
     if not _permanent(root):
         return False, "activation requires a permanent Research checkout"
-    if not watcher.is_file() or not _tracked(runner, root):
+    if not watcher.is_file() or not _tracked(
+        runner, root, WATCHER_RELATIVE_PATH
+    ):
         return False, "funding watcher must exist and be tracked by Git"
     paths = _paths(home)
     if paths["corePlist"].exists():
@@ -150,7 +191,9 @@ def _prerequisites(
     try:
         watcher_config = _load_object(root / "config/funding-watcher.json")
         research_config = _load_object(root / "config/research.json")
-        state = Path(watcher_config["stateDirectory"]).expanduser()
+        state = _path_from_selected_home(
+            watcher_config["stateDirectory"], home
+        )
         ledger = FundingWatcherLedger(state / "ledger.json")
         sources = watcher_config["sources"]
         if (
@@ -159,21 +202,32 @@ def _prerequisites(
             or any(
                 not isinstance(source, dict)
                 or not isinstance(source.get("url"), str)
-                or not ledger.bootstrap_complete(source["url"])
+                or not _bootstrap_complete(ledger, source["url"])
                 for source in sources
             )
         ):
             return False, "Research funding ledger is not bootstrap-complete"
-        core_value = (research_config.get("crmCore") or {}).get("path")
+        core_config = research_config.get("crmCore")
+        if not isinstance(core_config, dict):
+            return False, "permanent CRM Core path is not configured"
+        core_value = core_config.get("path")
         if not isinstance(core_value, str) or not core_value.strip():
             return False, "permanent CRM Core path is not configured"
+        if core_config.get("fundingHandoff") != (
+            CORE_HANDOFF_RELATIVE_PATH.as_posix()
+        ):
+            return False, "CRM Core funding handoff CLI path is invalid"
         core_root = Path(core_value).expanduser()
         if not core_root.is_absolute():
             core_root = root / core_root
         core_root = core_root.resolve()
         if not _permanent(core_root):
             return False, "activation requires a permanent CRM Core checkout"
-        core_script = core_root / "scripts/crm_funding_handoff.py"
+        core_script = core_root / CORE_HANDOFF_RELATIVE_PATH
+        if not core_script.is_file() or not _tracked(
+            runner, core_root, CORE_HANDOFF_RELATIVE_PATH
+        ):
+            return False, "CRM Core funding handoff CLI must be tracked by Git"
         text = core_script.read_text(encoding="utf-8")
         request_match = re.search(
             r'^REQUEST_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
@@ -195,7 +249,12 @@ def _prerequisites(
     return True, ""
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
+def _atomic_write(
+    path: Path,
+    payload: bytes,
+    *,
+    mode: int = 0o644,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
@@ -207,15 +266,110 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        path.chmod(0o644)
+        path.chmod(mode)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
         finally:
             os.close(directory)
-    except Exception:
+    except OSError:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _remove_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _rollback_install(
+    *,
+    plist: Path,
+    previous_payload: bytes | None,
+    previous_mode: int | None,
+    reload_previous: bool,
+    runner: Runner,
+    uid: int,
+) -> list[str]:
+    errors: list[str] = []
+    restored = False
+    try:
+        if previous_payload is None:
+            _remove_file(plist)
+        elif previous_mode is None:
+            errors.append("prior plist mode was unavailable")
+        else:
+            _atomic_write(plist, previous_payload, mode=previous_mode)
+            restored = True
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append(f"plist restore failed: {type(exc).__name__}: {exc}")
+        if previous_payload is not None and previous_mode is not None:
+            try:
+                restored = (
+                    plist.read_bytes() == previous_payload
+                    and stat.S_IMODE(plist.stat().st_mode) == previous_mode
+                )
+            except OSError as verification_error:
+                errors.append(
+                    "prior plist verification failed: "
+                    f"{type(verification_error).__name__}: "
+                    f"{verification_error}"
+                )
+    if reload_previous:
+        if previous_payload is None:
+            errors.append("prior loaded service had no restorable plist")
+        elif restored:
+            try:
+                reloaded = _run(
+                    runner,
+                    [
+                        "launchctl",
+                        "bootstrap",
+                        f"gui/{uid}",
+                        str(plist),
+                    ],
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(
+                    "prior service reload failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                if reloaded.returncode:
+                    errors.append("prior service reload failed")
+    return errors
+
+
+def _post_replace_failure(
+    primary: str,
+    *,
+    plist: Path,
+    previous_payload: bytes | None,
+    previous_mode: int | None,
+    reload_previous: bool,
+    runner: Runner,
+    uid: int,
+) -> int:
+    rollback_errors = _rollback_install(
+        plist=plist,
+        previous_payload=previous_payload,
+        previous_mode=previous_mode,
+        reload_previous=reload_previous,
+        runner=runner,
+        uid=uid,
+    )
+    if rollback_errors:
+        print(
+            f"{primary}; rollback failed: {'; '.join(rollback_errors)}",
+            file=sys.stderr,
+        )
+    else:
+        print(primary, file=sys.stderr)
+    return INTERNAL
 
 
 def _install(
@@ -237,40 +391,66 @@ def _install(
     payload = render_plist(
         repo_root, home, python_path, paths["stdout"], paths["stderr"]
     )
+    previous_payload: bytes | None = None
+    previous_mode: int | None = None
+    if paths["plist"].exists():
+        previous_payload = paths["plist"].read_bytes()
+        previous_mode = stat.S_IMODE(paths["plist"].stat().st_mode)
     is_loaded = _loaded(runner, uid)
-    if paths["plist"].exists() and paths["plist"].read_bytes() == payload and is_loaded:
+    if previous_payload == payload and is_loaded:
         print(f"{LABEL} is already installed and loaded")
         return OK
-    if is_loaded:
-        bootout = _run(
-            runner,
-            [
-                "launchctl",
-                "bootout",
-                f"gui/{uid}",
-                str(paths["plist"]),
-            ],
+    stage = "launchctl bootout"
+    bootout_failed = False
+    failure: str | None = None
+    try:
+        if is_loaded:
+            bootout = _run(
+                runner,
+                [
+                    "launchctl",
+                    "bootout",
+                    f"gui/{uid}",
+                    str(paths["plist"]),
+                ],
+            )
+            if bootout.returncode:
+                bootout_failed = True
+        if not bootout_failed:
+            stage = "plist installation"
+            _atomic_write(paths["plist"], payload)
+            stage = "plist validation"
+            lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
+            if lint.returncode:
+                failure = "plist validation failed"
+            else:
+                stage = "launchctl bootstrap"
+                loaded = _run(
+                    runner,
+                    [
+                        "launchctl",
+                        "bootstrap",
+                        f"gui/{uid}",
+                        str(paths["plist"]),
+                    ],
+                )
+                if loaded.returncode:
+                    failure = "launchctl bootstrap failed"
+    except (OSError, subprocess.SubprocessError) as exc:
+        failure = f"{stage} failed: {type(exc).__name__}: {exc}"
+    if bootout_failed:
+        print("launchctl bootout failed", file=sys.stderr)
+        return INTERNAL
+    if failure is not None:
+        return _post_replace_failure(
+            failure,
+            plist=paths["plist"],
+            previous_payload=previous_payload,
+            previous_mode=previous_mode,
+            reload_previous=is_loaded,
+            runner=runner,
+            uid=uid,
         )
-        if bootout.returncode:
-            print("launchctl bootout failed", file=sys.stderr)
-            return INTERNAL
-    _atomic_write(paths["plist"], payload)
-    lint = _run(runner, ["plutil", "-lint", str(paths["plist"])])
-    if lint.returncode:
-        print("plist validation failed", file=sys.stderr)
-        return INTERNAL
-    loaded = _run(
-        runner,
-        [
-            "launchctl",
-            "bootstrap",
-            f"gui/{uid}",
-            str(paths["plist"]),
-        ],
-    )
-    if loaded.returncode:
-        print("launchctl bootstrap failed", file=sys.stderr)
-        return INTERNAL
     print(f"installed and loaded {LABEL}")
     return OK
 

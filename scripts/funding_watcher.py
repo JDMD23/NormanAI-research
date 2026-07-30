@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, ContextManager
 
@@ -25,6 +26,7 @@ from lib.browser_coordination import (  # noqa: E402
     DailyCrunchbaseBudget,
     SharedBrowserLease,
 )
+from lib.chrome import applescript_string_literal  # noqa: E402
 from lib.crunchbase_saved_list import (  # noqa: E402
     CrunchbaseSavedListBlocked,
     CrunchbaseSavedListBrowser,
@@ -35,6 +37,7 @@ from lib.crunchbase_saved_list import (  # noqa: E402
 from lib.funding_handoff import (  # noqa: E402
     build_handoff,
     invoke_crm_handoff,
+    validate_result,
     write_handoff,
 )
 from lib.funding_watcher_state import (  # noqa: E402
@@ -54,6 +57,8 @@ CONFIG_ERROR_STATUSES = {
     "auth_wall",
     "source_drift",
     "result_schema_mismatch",
+    "budget_state_invalid",
+    "bootstrap_required",
 }
 TERMINAL_CORE_STATES = {
     "created",
@@ -62,6 +67,8 @@ TERMINAL_CORE_STATES = {
     "rejected_identity",
     "ambiguous_review",
 }
+HEARTBEAT_SCHEMA = "norman.research.crunchbase_funding_heartbeat.v1"
+SUCCESS_STATUSES = {"complete", "already_checked_slot", "already_bootstrapped"}
 
 
 @dataclass
@@ -86,32 +93,57 @@ def run_check(
     run_id = _run_id(now)
     receipt = _base_receipt("check", run_id, now, write)
     state_root = dependencies.ledger.path.parent
+    finish = partial(_finish, notify=dependencies.notify)
     with dependencies.run_lock() as acquired:
         if not acquired:
-            return _finish(state_root, receipt, "busy", "run_lock_unavailable")
+            return finish(state_root, receipt, "busy", "run_lock_unavailable")
         if not config["enabled"]:
-            return _finish(state_root, receipt, "disabled", "watcher_disabled")
+            return finish(state_root, receipt, "disabled", "watcher_disabled")
         slot = new_york_slot(now, config["scheduleHours"]) if enforce_schedule else None
         receipt["slot"] = slot
         if enforce_schedule and slot is None:
-            return _finish(state_root, receipt, "outside_schedule", "outside_schedule")
+            return finish(state_root, receipt, "outside_schedule", "outside_schedule")
         if slot and dependencies.ledger.slot_complete(slot):
-            return _finish(
+            return finish(
                 state_root, receipt, "already_checked_slot", "slot_already_complete"
+            )
+
+        sources = config["sourceDefinitions"]
+        if not all(
+            dependencies.ledger.bootstrap_complete(source.url)
+            for source in sources
+        ):
+            return finish(
+                state_root,
+                receipt,
+                "bootstrap_required",
+                "source_not_bootstrapped",
             )
 
         max_pages = config["scheduledMaxPagesPerSource"]
         snapshots = []
         try:
-            for source in config["sourceDefinitions"]:
-                granted = dependencies.budget.claim(
-                    now,
-                    requested=max_pages,
-                    lane="research-funding-watcher",
-                    exact=True,
-                )
+            for source in sources:
+                try:
+                    granted = dependencies.budget.claim(
+                        now,
+                        requested=max_pages,
+                        lane="research-funding-watcher",
+                        exact=True,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    receipt["error"] = {
+                        "reason": type(exc).__name__,
+                        "evidence": str(exc)[:500],
+                    }
+                    return finish(
+                        state_root,
+                        receipt,
+                        "budget_state_invalid",
+                        "budget_contract_failed",
+                    )
                 if granted == 0:
-                    return _finish(
+                    return finish(
                         state_root, receipt, "budget_exhausted", "no_page_budget"
                     )
                 receipt["pagesReserved"] += granted
@@ -124,28 +156,75 @@ def run_check(
                         )
                     )
         except BrowserLeaseUnavailable:
-            return _finish(
+            return finish(
                 state_root, receipt, "busy", "shared_browser_lease_unavailable"
             )
         except CrunchbaseSavedListBlocked as exc:
             receipt["error"] = {"reason": exc.reason, "evidence": exc.evidence}
             status = exc.reason if exc.reason in CONFIG_ERROR_STATUSES else "browser_retryable"
-            return _finish(state_root, receipt, status, "browser_blocked")
+            return finish(state_root, receipt, status, "browser_blocked")
         except CrunchbaseSavedListDrift as exc:
             receipt["error"] = {"reason": "source_drift", "evidence": str(exc)}
-            return _finish(state_root, receipt, "source_drift", "source_contract_failed")
+            return finish(state_root, receipt, "source_drift", "source_contract_failed")
         except Exception as exc:
             receipt["error"] = {
                 "reason": type(exc).__name__,
                 "evidence": str(exc)[:500],
             }
-            return _finish(state_root, receipt, "browser_retryable", "browser_error")
+            return finish(state_root, receipt, "browser_retryable", "browser_error")
 
         pending: list[tuple[str, FundingObservation]] = []
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
-            receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
-            for row in snapshot.observations:
+            excluded, actionable = _partition_rejections(snapshot.rejections)
+            receipt["counts"]["excluded_industry"] += len(excluded)
+            receipt["counts"]["rejected_parse"] += len(actionable)
+            if actionable:
+                return finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "source_rows_rejected",
+                )
+            covered_rows = len(snapshot.observations) + len(snapshot.rejections)
+            if (
+                not snapshot.new_at_top
+                or snapshot.source.expected_sort.casefold() != "new at top"
+            ):
+                return finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "new_at_top_contract_failed",
+                )
+            if covered_rows > snapshot.result_count:
+                return finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "invalid_snapshot_coverage",
+                )
+            rows_to_diff = snapshot.observations
+            if covered_rows < snapshot.result_count:
+                anchor_index = next(
+                    (
+                        index
+                        for index, row in enumerate(snapshot.observations)
+                        if dependencies.ledger.is_terminal(
+                            funding_event_key(row)
+                        )
+                    ),
+                    None,
+                )
+                if anchor_index is None:
+                    return finish(
+                        state_root,
+                        receipt,
+                        "source_drift",
+                        "missing_terminal_high_water_anchor",
+                    )
+                rows_to_diff = snapshot.observations
+            for row in rows_to_diff:
                 key = funding_event_key(row)
                 if dependencies.ledger.is_terminal(key):
                     receipt["counts"]["already_terminal"] += 1
@@ -156,7 +235,7 @@ def run_check(
         if not pending:
             if write and slot:
                 dependencies.ledger.mark_slot_complete(slot, run_id=run_id)
-            return _finish(state_root, receipt, "complete", "")
+            return finish(state_root, receipt, "complete", "")
 
         request = build_handoff(
             run_id,
@@ -166,17 +245,23 @@ def run_check(
         if not write:
             try:
                 result = dependencies.invoke_handoff(request, False)
+                _require_validated_result(result, request, write=False)
             except Exception as exc:
                 receipt["error"] = {
                     "reason": type(exc).__name__,
                     "evidence": str(exc)[:500],
                 }
-                return _finish(
-                    state_root, receipt, "crm_retryable", "crm_preview_failed"
+                status = (
+                    "result_schema_mismatch"
+                    if isinstance(exc, ValueError)
+                    else "crm_retryable"
+                )
+                return finish(
+                    state_root, receipt, status, "crm_preview_failed"
                 )
             receipt["events"] = list(result["events"])
             receipt["counts"]["would_handoff"] = len(pending)
-            return _finish(state_root, receipt, "complete", "")
+            return finish(state_root, receipt, "complete", "")
 
         for key, row in pending:
             dependencies.ledger.observe(
@@ -187,8 +272,10 @@ def run_check(
             dependencies.ledger.mark_handoff_pending(
                 key, run_id=run_id, observed_at=now.isoformat()
             )
+        _publish_detector_receipt(state_root, receipt)
         try:
             result = dependencies.invoke_handoff(request, True)
+            _require_validated_result(result, request, write=True)
             _require_result_alignment(result, pending)
         except Exception as exc:
             for key, _ in pending:
@@ -204,7 +291,13 @@ def run_check(
                 if isinstance(exc, ValueError)
                 else "crm_retryable"
             )
-            return _finish(state_root, receipt, status, "crm_handoff_failed")
+            return finish(
+                state_root,
+                receipt,
+                status,
+                "crm_handoff_failed",
+                publish_immutable=False,
+            )
 
         notifications: list[str] = []
         for event, (key, row) in zip(result["events"], pending):
@@ -215,8 +308,12 @@ def run_check(
                     reason=f"nonterminal_core_state:{state}",
                     observed_at=now.isoformat(),
                 )
-                return _finish(
-                    state_root, receipt, "crm_retryable", "nonterminal_core_result"
+                return finish(
+                    state_root,
+                    receipt,
+                    "crm_retryable",
+                    "nonterminal_core_result",
+                    publish_immutable=False,
                 )
             dependencies.ledger.mark_terminal(
                 key,
@@ -229,9 +326,16 @@ def run_check(
         receipt["events"] = list(result["events"])
         if slot:
             dependencies.ledger.mark_slot_complete(slot, run_id=run_id)
+        finished = finish(
+            state_root,
+            receipt,
+            "complete",
+            "",
+            publish_immutable=False,
+        )
         if notifications:
             dependencies.notify(notifications)
-        return _finish(state_root, receipt, "complete", "")
+        return finished
 
 
 def run_bootstrap(
@@ -242,31 +346,50 @@ def run_bootstrap(
     write: bool,
     now: datetime,
 ) -> dict[str, Any]:
+    if (
+        not isinstance(seed_top, int)
+        or isinstance(seed_top, bool)
+        or seed_top <= 0
+    ):
+        raise ValueError("seed_top must be a positive integer")
     run_id = _run_id(now)
     receipt = _base_receipt("bootstrap", run_id, now, write)
     state_root = dependencies.ledger.path.parent
+    finish = partial(_finish, notify=dependencies.notify)
     with dependencies.run_lock() as acquired:
         if not acquired:
-            return _finish(state_root, receipt, "busy", "run_lock_unavailable")
+            return finish(state_root, receipt, "busy", "run_lock_unavailable")
         if not config["enabled"]:
-            return _finish(state_root, receipt, "disabled", "watcher_disabled")
+            return finish(state_root, receipt, "disabled", "watcher_disabled")
         sources = config["sourceDefinitions"]
         if all(dependencies.ledger.bootstrap_complete(source.url) for source in sources):
-            return _finish(
+            return finish(
                 state_root, receipt, "already_bootstrapped", "bootstrap_complete"
             )
         max_pages = config["bootstrapMaxPagesPerSource"]
         snapshots = []
         try:
             for source in sources:
-                granted = dependencies.budget.claim(
-                    now,
-                    requested=max_pages,
-                    lane="research-funding-bootstrap",
-                    exact=True,
-                )
+                try:
+                    granted = dependencies.budget.claim(
+                        now,
+                        requested=max_pages,
+                        lane="research-funding-bootstrap",
+                        exact=True,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    receipt["error"] = {
+                        "reason": type(exc).__name__,
+                        "evidence": str(exc)[:500],
+                    }
+                    return finish(
+                        state_root,
+                        receipt,
+                        "budget_state_invalid",
+                        "budget_contract_failed",
+                    )
                 if granted < max_pages:
-                    return _finish(
+                    return finish(
                         state_root,
                         receipt,
                         "budget_exhausted",
@@ -282,34 +405,38 @@ def run_bootstrap(
                         )
                     )
         except BrowserLeaseUnavailable:
-            return _finish(state_root, receipt, "busy", "shared_browser_lease_unavailable")
+            return finish(state_root, receipt, "busy", "shared_browser_lease_unavailable")
         except CrunchbaseSavedListBlocked as exc:
             receipt["error"] = {"reason": exc.reason, "evidence": exc.evidence}
-            return _finish(state_root, receipt, exc.reason, "browser_blocked")
+            return finish(state_root, receipt, exc.reason, "browser_blocked")
         except CrunchbaseSavedListDrift as exc:
             receipt["error"] = {"reason": "source_drift", "evidence": str(exc)}
-            return _finish(state_root, receipt, "source_drift", "source_contract_failed")
+            return finish(state_root, receipt, "source_drift", "source_contract_failed")
         except Exception as exc:
             receipt["error"] = {
                 "reason": type(exc).__name__,
                 "evidence": str(exc)[:500],
             }
-            return _finish(state_root, receipt, "browser_retryable", "browser_error")
+            return finish(state_root, receipt, "browser_retryable", "browser_error")
 
         observations: list[FundingObservation] = []
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
+            excluded, actionable = _partition_rejections(snapshot.rejections)
+            receipt["counts"]["excluded_industry"] += len(excluded)
+            receipt["counts"]["rejected_parse"] += len(actionable)
+            if actionable:
+                return finish(
+                    state_root,
+                    receipt,
+                    "source_drift",
+                    "source_rows_rejected",
+                )
             if snapshot.result_count != len(snapshot.observations) + len(snapshot.rejections):
-                return _finish(
+                return finish(
                     state_root, receipt, "source_drift", "incomplete_bootstrap_coverage"
                 )
             observations.extend(snapshot.observations)
-        if (
-            not isinstance(seed_top, int)
-            or isinstance(seed_top, bool)
-            or seed_top <= 0
-        ):
-            raise ValueError("seed_top must be a positive integer")
         candidates, baseline = observations[:seed_top], observations[seed_top:]
         all_pairs = [(funding_event_key(row), row) for row in candidates]
         pairs = [
@@ -319,7 +446,7 @@ def run_bootstrap(
         already_terminal = len(all_pairs) - len(pairs)
         if not pairs:
             if not all_pairs:
-                return _finish(state_root, receipt, "source_drift", "empty_bootstrap")
+                return finish(state_root, receipt, "source_drift", "empty_bootstrap")
             if write:
                 added = _baseline_and_complete(
                     dependencies, sources, baseline, now
@@ -329,27 +456,41 @@ def run_bootstrap(
                     "queued_existing": 0,
                     "baselined": added,
                     "already_terminal": already_terminal,
+                    "rejected_parse": 0,
+                    "excluded_industry": receipt["counts"]["excluded_industry"],
                 }
             else:
                 receipt["counts"]["would_baseline"] = len(baseline)
                 receipt["counts"]["already_terminal"] = already_terminal
-            return _finish(state_root, receipt, "complete", "")
+            return finish(state_root, receipt, "complete", "")
         request = build_handoff(
             run_id, now.astimezone(timezone.utc).isoformat(), pairs
         )
         if not write:
             try:
                 result = dependencies.invoke_handoff(request, False)
+                _require_validated_result(result, request, write=False)
             except Exception as exc:
                 receipt["error"] = {
                     "reason": type(exc).__name__,
                     "evidence": str(exc)[:500],
                 }
-                return _finish(state_root, receipt, "crm_retryable", "crm_preview_failed")
+                status = (
+                    "result_schema_mismatch"
+                    if isinstance(exc, ValueError)
+                    else "crm_retryable"
+                )
+                return finish(
+                    state_root,
+                    receipt,
+                    status,
+                    "crm_preview_failed",
+                )
             receipt["events"] = list(result["events"])
-            receipt["counts"]["would_handoff"] = len(candidates)
+            receipt["counts"]["would_handoff"] = len(pairs)
             receipt["counts"]["would_baseline"] = len(baseline)
-            return _finish(state_root, receipt, "complete", "")
+            receipt["counts"]["already_terminal"] = already_terminal
+            return finish(state_root, receipt, "complete", "")
 
         for key, row in pairs:
             dependencies.ledger.observe(
@@ -358,20 +499,32 @@ def run_bootstrap(
             dependencies.ledger.mark_handoff_pending(
                 key, run_id=run_id, observed_at=now.isoformat()
             )
+        _publish_detector_receipt(state_root, receipt)
         try:
             result = dependencies.invoke_handoff(request, True)
+            _require_validated_result(result, request, write=True)
             _require_result_alignment(result, pairs)
         except Exception as exc:
             for key, _ in pairs:
                 dependencies.ledger.mark_retryable(
                     key, reason=str(exc)[:500], observed_at=now.isoformat()
                 )
+            receipt["error"] = {
+                "reason": type(exc).__name__,
+                "evidence": str(exc)[:500],
+            }
             status = (
                 "result_schema_mismatch"
                 if isinstance(exc, ValueError)
                 else "crm_retryable"
             )
-            return _finish(state_root, receipt, status, "crm_handoff_failed")
+            return finish(
+                state_root,
+                receipt,
+                status,
+                "crm_handoff_failed",
+                publish_immutable=False,
+            )
 
         notifications = []
         counts = {
@@ -379,6 +532,8 @@ def run_bootstrap(
             "queued_existing": 0,
             "baselined": 0,
             "already_terminal": already_terminal,
+            "rejected_parse": 0,
+            "excluded_industry": receipt["counts"]["excluded_industry"],
         }
         for event, (key, row) in zip(result["events"], pairs):
             state = event["state"]
@@ -388,8 +543,12 @@ def run_bootstrap(
                     reason=f"nonterminal_core_state:{state}",
                     observed_at=now.isoformat(),
                 )
-                return _finish(
-                    state_root, receipt, "crm_retryable", "nonterminal_core_result"
+                return finish(
+                    state_root,
+                    receipt,
+                    "crm_retryable",
+                    "nonterminal_core_result",
+                    publish_immutable=False,
                 )
             dependencies.ledger.mark_terminal(
                 key,
@@ -405,8 +564,15 @@ def run_bootstrap(
         )
         receipt["events"] = list(result["events"])
         receipt["counts"] = counts
+        finished = finish(
+            state_root,
+            receipt,
+            "complete",
+            "",
+            publish_immutable=False,
+        )
         dependencies.notify(notifications)
-        return _finish(state_root, receipt, "complete", "")
+        return finished
 
 
 def _base_receipt(
@@ -428,6 +594,7 @@ def _base_receipt(
             "new_events": 0,
             "already_terminal": 0,
             "rejected_parse": 0,
+            "excluded_industry": 0,
             "would_handoff": 0,
         },
     }
@@ -438,12 +605,138 @@ def _finish(
     receipt: dict[str, Any],
     status: str,
     reason: str,
+    *,
+    publish_immutable: bool = True,
+    notify: Callable[[list[str]], None] | None = None,
 ) -> dict[str, Any]:
     receipt["status"] = status
     receipt["stopReason"] = reason
-    write_immutable_receipt(state_root, receipt)
+    if publish_immutable:
+        write_immutable_receipt(state_root, receipt)
     _atomic_write_json(state_root / "latest.json", receipt)
+    heartbeat, alerts = _next_heartbeat(
+        state_root / "heartbeat.json",
+        receipt,
+    )
+    _atomic_write_json(state_root / "heartbeat.json", heartbeat)
+    if alerts and notify is not None:
+        try:
+            notify(alerts)
+        except Exception:
+            # Alerting is best-effort and happens only after the receipt,
+            # latest pointer, and heartbeat are durable. It must never alter
+            # watcher control flow or event state.
+            pass
     return receipt
+
+
+def _next_heartbeat(
+    path: Path,
+    receipt: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    previous, recovered_invalid = _load_heartbeat(path)
+    status = receipt["status"]
+    reason = receipt["stopReason"]
+    failure_key = f"{status}:{reason}"
+    is_failure = status in CONFIG_ERROR_STATUSES or status in RETRYABLE_STATUSES
+    alerts: list[str] = []
+
+    if is_failure:
+        same_failure = previous.get("lastFailureKey") == failure_key
+        consecutive_failures = (
+            int(previous.get("consecutiveFailures", 0)) + 1
+            if same_failure
+            else 1
+        )
+        last_failure_key: str | None = failure_key
+        last_alert_key = previous.get("lastAlertKey")
+        should_alert = (
+            status in CONFIG_ERROR_STATUSES
+            or (
+                status in RETRYABLE_STATUSES
+                and consecutive_failures >= 2
+            )
+        ) and last_alert_key != failure_key
+        if should_alert:
+            alerts.append(
+                "Funding watcher failure: "
+                f"status={status}; reason={reason}; runId={receipt['runId']}"
+            )
+            last_alert_key = failure_key
+    else:
+        consecutive_failures = 0
+        last_failure_key = None
+        last_alert_key = None
+
+    if recovered_invalid:
+        alerts.insert(
+            0,
+            "Funding watcher heartbeat was invalid and has been recovered.",
+        )
+        if not is_failure:
+            last_alert_key = "heartbeat_state_invalid"
+
+    previous_success = previous.get("lastSuccessAt")
+    last_success_at = (
+        receipt["startedAt"]
+        if status in SUCCESS_STATUSES
+        else previous_success
+    )
+    heartbeat = {
+        "schemaVersion": HEARTBEAT_SCHEMA,
+        "lastRunAt": receipt["startedAt"],
+        "lastRunStatus": status,
+        "lastRunStopReason": reason,
+        "lastSuccessAt": last_success_at,
+        "consecutiveFailures": consecutive_failures,
+        "lastFailureKey": last_failure_key,
+        "lastAlertKey": last_alert_key,
+        "lastAlertAt": (
+            receipt["startedAt"]
+            if alerts
+            else previous.get("lastAlertAt")
+        ),
+        "recoveredInvalidHeartbeat": recovered_invalid,
+        "runId": receipt["runId"],
+        "action": receipt["action"],
+        "slot": receipt["slot"],
+        "pagesReserved": receipt["pagesReserved"],
+        "counts": dict(receipt["counts"]),
+    }
+    return heartbeat, alerts
+
+
+def _load_heartbeat(path: Path) -> tuple[dict[str, Any], bool]:
+    if not path.exists():
+        return {}, False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}, True
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schemaVersion") != HEARTBEAT_SCHEMA
+        or not isinstance(payload.get("consecutiveFailures"), int)
+        or isinstance(payload.get("consecutiveFailures"), bool)
+        or payload["consecutiveFailures"] < 0
+    ):
+        return {}, True
+    return payload, False
+
+
+def _publish_detector_receipt(
+    state_root: Path,
+    receipt: dict[str, Any],
+) -> None:
+    detector_receipt = {
+        **receipt,
+        "status": "handoff_pending",
+        "stopReason": "",
+        "sources": list(receipt["sources"]),
+        "events": [],
+        "counts": dict(receipt["counts"]),
+    }
+    write_immutable_receipt(state_root, detector_receipt)
 
 
 def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
@@ -454,8 +747,32 @@ def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
         "pageCount": snapshot.page_count,
         "observations": len(snapshot.observations),
         "rejections": len(snapshot.rejections),
+        "rejectionDetails": [
+            {
+                "company": str(item.get("company", ""))[:200],
+                "reason": str(item.get("reason", ""))[:500],
+            }
+            for item in snapshot.rejections[:100]
+        ],
         "topFundingDate": snapshot.top_funding_date,
     }
+
+
+def _partition_rejections(
+    rejections: tuple[dict[str, str], ...],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    excluded: list[dict[str, str]] = []
+    actionable: list[dict[str, str]] = []
+    for rejection in rejections:
+        target = (
+            excluded
+            if str(rejection.get("reason", "")).startswith(
+                "excluded_industry:"
+            )
+            else actionable
+        )
+        target.append(dict(rejection))
+    return excluded, actionable
 
 
 def _observation_details(row: FundingObservation) -> dict[str, Any]:
@@ -480,6 +797,18 @@ def _require_result_alignment(
     ]
     if actual != expected:
         raise ValueError("CRM result event key order does not match request")
+
+
+def _require_validated_result(
+    result: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    write: bool,
+) -> None:
+    validate_result(result, request=request)
+    expected_mode = "write" if write else "dry_run"
+    if result["mode"] != expected_mode:
+        raise ValueError("CRM result mode does not match invocation")
 
 
 def _baseline_and_complete(
@@ -545,18 +874,25 @@ def _notification(items: list[str]) -> None:
     if not items:
         return
     body = "\n".join(items[:10])
-    subprocess.run(
-        [
-            "osascript",
-            "-e",
-            f'display notification {json.dumps(body)} with title '
-            f'{json.dumps("Norman funding watcher")}',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                "display notification "
+                f"{applescript_string_literal(body)} with title "
+                f"{applescript_string_literal('Norman funding watcher')}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Notification is best-effort and runs only after terminal state and
+        # the final latest receipt are durable. A transport failure must not
+        # turn a completed event into retryable duplicate work.
+        return
 
 
 def _production_dependencies(config: dict[str, Any]) -> WatcherDependencies:
@@ -590,6 +926,18 @@ def _exit_code(receipt: dict[str, Any]) -> int:
     return 0
 
 
+def _positive_cli_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -607,7 +955,11 @@ def main(argv: list[str] | None = None) -> int:
         if name == "check":
             command.add_argument("--enforce-schedule", action="store_true")
         else:
-            command.add_argument("--seed-top", type=int, default=10)
+            command.add_argument(
+                "--seed-top",
+                type=_positive_cli_integer,
+                default=10,
+            )
     commands.add_parser("migrate-legacy-state")
     try:
         args = parser.parse_args(argv)
