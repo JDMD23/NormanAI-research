@@ -239,9 +239,9 @@ heuristics, or automated rule tuning.
 
 Those changes are staged in CRM Core's
 `docs/funding-intelligence-roadmap.md`. Each has an evidence gate. In
-particular, the current two-page window is measured before reconciliation can
+particular, the current two-check window is measured before reconciliation can
 write, and a second list is forbidden until its staggered slots fit inside the
-same 25-page New York-day ceiling.
+same ten-check Research allocation in the 40-work-item New York-day ledger.
 
 ## 11. Hard forbidden
 

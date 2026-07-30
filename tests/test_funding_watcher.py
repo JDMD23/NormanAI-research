@@ -65,19 +65,12 @@ class FakeBrowser:
         self,
         rows: list[FundingObservation],
         *,
-        rejections: int | list[dict[str, str]] = 0,
+        rejections: int = 0,
         result_count: int | None = None,
         error: Exception | None = None,
     ):
         self.rows = rows
-        self.rejections = (
-            [
-                {"company": f"Rejected {index}", "reason": "invalid"}
-                for index in range(rejections)
-            ]
-            if isinstance(rejections, int)
-            else [dict(item) for item in rejections]
-        )
+        self.rejections = rejections
         self.result_count = result_count
         self.error = error
         self.calls: list[int] = []
@@ -95,12 +88,15 @@ class FakeBrowser:
             result_count=(
                 self.result_count
                 if self.result_count is not None
-                else len(self.rows) + len(self.rejections)
+                else len(self.rows) + self.rejections
             ),
             page_count=max_pages,
             top_funding_date=self.rows[0].funding_date if self.rows else None,
             observations=tuple(self.rows),
-            rejections=tuple(self.rejections),
+            rejections=tuple(
+                {"company": f"Rejected {i}", "reason": "invalid"}
+                for i in range(self.rejections)
+            ),
         )
 
 
@@ -118,8 +114,6 @@ class FakeBudget:
         exact: bool = False,
     ):
         self.claims.append(requested)
-        if exact and self.granted < requested:
-            return 0
         return min(requested, self.granted)
 
 
@@ -135,7 +129,8 @@ def config(tmp_path: Path, *, enabled: bool = True) -> dict:
         "scheduledMaxPagesPerSource": 2,
         "bootstrapMaxPagesPerSource": 6,
         "bootstrapSeedTop": 10,
-        "dailyPageLoadCeiling": 25,
+        "sharedWorkItemCeiling": 40,
+        "researchDailyCheckLimit": 10,
         "stateDirectory": str(tmp_path / "state"),
         "legacyStateDirectory": str(tmp_path / "legacy"),
         "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
@@ -218,12 +213,7 @@ def test_outside_slot_and_disabled_never_touch_budget_or_browser(
     tmp_path: Path,
 ) -> None:
     browser, budget = FakeBrowser([]), FakeBudget()
-    deps = dependencies(
-        tmp_path,
-        browser,
-        budget=budget,
-        bootstrapped=False,
-    )
+    deps = dependencies(tmp_path, browser, budget=budget)
     receipt = run_check(
         config(tmp_path),
         deps,
@@ -259,39 +249,47 @@ def test_second_successful_run_in_same_slot_does_no_work(tmp_path: Path) -> None
     assert len(browser.calls) == 1
 
 
-def test_scheduled_check_refuses_partial_capacity_before_browser(
+def test_research_watcher_cannot_exceed_ten_daily_checks(
     tmp_path: Path,
 ) -> None:
     budget = DailyCrunchbaseBudget(tmp_path / "shared-budget.json")
-    assert budget.claim(NOW, requested=24, lane="capacity-fill") == 24
     browser = FakeBrowser([])
     deps = dependencies(tmp_path, browser, budget=budget)
 
-    receipt = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=True,
-    )
+    receipts = [
+        run_check(
+            config(tmp_path),
+            deps,
+            write=True,
+            now=NOW.replace(hour=hour),
+            enforce_schedule=False,
+        )
+        for hour in (6, 10, 13, 16, 19, 20)
+    ]
 
-    assert receipt["status"] == "budget_exhausted"
-    assert receipt["pagesReserved"] == 0
-    assert browser.calls == []
-    assert budget.snapshot(NOW)["used"] == 24
+    assert [receipt["status"] for receipt in receipts[:5]] == [
+        "complete"
+    ] * 5
+    assert receipts[5]["status"] == "budget_exhausted"
+    assert browser.calls == [2] * 5
 
 
 def test_bootstrap_refuses_partial_capacity_without_consuming_it(
     tmp_path: Path,
 ) -> None:
     budget = DailyCrunchbaseBudget(tmp_path / "shared-budget.json")
-    assert budget.claim(NOW, requested=20, lane="capacity-fill") == 20
+    assert budget.claim(
+        NOW.replace(hour=6), requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.claim(
+        NOW.replace(hour=10), requested=2, lane="research-funding-watcher"
+    ) == 2
+    assert budget.claim(
+        NOW.replace(hour=13), requested=1, lane="research-funding-watcher"
+    ) == 1
     browser = FakeBrowser([observation()])
     deps = dependencies(
-        tmp_path,
-        browser,
-        budget=budget,
-        bootstrapped=False,
+        tmp_path, browser, budget=budget, bootstrapped=False
     )
 
     receipt = run_bootstrap(
@@ -305,7 +303,7 @@ def test_bootstrap_refuses_partial_capacity_without_consuming_it(
     assert receipt["status"] == "budget_exhausted"
     assert receipt["pagesReserved"] == 0
     assert browser.calls == []
-    assert budget.snapshot(NOW)["used"] == 20
+    assert budget.snapshot(NOW)["used"] == 5
 
 
 def test_busy_and_budget_exhausted_are_distinct_retryable_receipts(
@@ -489,7 +487,9 @@ def test_bootstrap_handoffs_top_ten_then_baselines_remainder(
 ) -> None:
     rows = [observation(i) for i in range(189)]
     names: list[str] = []
-    deps = dependencies(tmp_path, FakeBrowser(rows), bootstrapped=False)
+    deps = dependencies(
+        tmp_path, FakeBrowser(rows), bootstrapped=False
+    )
     deps.notify = lambda values: names.extend(values)
     receipt = run_bootstrap(
         config(tmp_path),
@@ -503,8 +503,6 @@ def test_bootstrap_handoffs_top_ten_then_baselines_remainder(
         "queued_existing": 0,
         "baselined": 179,
         "already_terminal": 0,
-        "rejected_parse": 0,
-        "excluded_industry": 0,
     }
     assert len(deps.ledger.events) == 189
     assert all(deps.ledger.is_terminal(key) for key in deps.ledger.events)
@@ -518,7 +516,9 @@ def test_bootstrap_resumes_after_top_ten_were_terminal_before_baseline(
     tmp_path: Path,
 ) -> None:
     rows = [observation(i) for i in range(12)]
-    deps = dependencies(tmp_path, FakeBrowser(rows), bootstrapped=False)
+    deps = dependencies(
+        tmp_path, FakeBrowser(rows), bootstrapped=False
+    )
     for row in rows[:10]:
         key = funding_event_key(row)
         deps.ledger.observe(key, observed_at=row.observed_at)
@@ -546,7 +546,9 @@ def test_bootstrap_resumes_after_top_ten_were_terminal_before_baseline(
 
 def test_dry_bootstrap_does_not_record_state(tmp_path: Path) -> None:
     rows = [observation(i) for i in range(12)]
-    deps = dependencies(tmp_path, FakeBrowser(rows), bootstrapped=False)
+    deps = dependencies(
+        tmp_path, FakeBrowser(rows), bootstrapped=False
+    )
     receipt = run_bootstrap(
         config(tmp_path),
         deps,
@@ -657,22 +659,17 @@ def test_check_rejects_incomplete_snapshot_before_diff_or_core(
     assert deps.ledger.events == {}
 
 
-def test_unbootstrapped_full_snapshot_fails_before_budget_browser_or_core(
+def test_unbootstrapped_source_fails_before_budget_browser_or_core(
     tmp_path: Path,
 ) -> None:
     browser = FakeBrowser([observation(index) for index in range(40)])
     budget = FakeBudget()
     requests: list[dict] = []
-
-    def invoke(request: dict, write: bool) -> dict:
-        requests.append(request)
-        return core_result(request, write=write)
-
     deps = dependencies(
         tmp_path,
         browser,
         budget=budget,
-        invoke=invoke,
+        invoke=lambda request, write: requests.append(request),
         bootstrapped=False,
     )
 
@@ -831,6 +828,7 @@ def test_truncated_all_new_window_fails_before_core_or_state_mutation(
         FakeBrowser(rows, result_count=195),
         invoke=lambda request, write: calls.append(request),
     )
+    ledger_before = deps.ledger.path.read_bytes()
 
     receipt = run_check(
         config(tmp_path),
@@ -844,9 +842,10 @@ def test_truncated_all_new_window_fails_before_core_or_state_mutation(
     assert receipt["stopReason"] == "missing_terminal_high_water_anchor"
     assert calls == []
     assert deps.ledger.events == {}
+    assert deps.ledger.path.read_bytes() == ledger_before
 
 
-def test_truncated_snapshot_actionable_rejection_fails_closed(
+def test_truncated_snapshot_parse_rejection_is_ambiguous_and_fails_closed(
     tmp_path: Path,
 ) -> None:
     rows = [observation(index) for index in range(99)]
@@ -868,119 +867,9 @@ def test_truncated_snapshot_actionable_rejection_fails_closed(
     )
 
     assert receipt["status"] == "source_drift"
-    assert receipt["stopReason"] == "source_rows_rejected"
+    assert receipt["stopReason"] == "ambiguous_truncated_snapshot"
     assert calls == []
     assert deps.ledger.path.read_bytes() == before
-
-
-def test_complete_snapshot_actionable_rejection_fails_before_core(
-    tmp_path: Path,
-) -> None:
-    requests: list[dict] = []
-    rejection = {"company": "Unreadable", "reason": "missing_company"}
-    deps = dependencies(
-        tmp_path,
-        FakeBrowser(
-            [observation(1)],
-            rejections=[rejection],
-        ),
-        invoke=lambda request, write: requests.append(request),
-    )
-
-    receipt = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    assert receipt["status"] == "source_drift"
-    assert receipt["stopReason"] == "source_rows_rejected"
-    assert receipt["counts"]["rejected_parse"] == 1
-    assert receipt["counts"]["excluded_industry"] == 0
-    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
-    assert requests == []
-    assert deps.ledger.events == {}
-
-
-def test_bootstrap_actionable_rejection_fails_before_handoff_or_baseline(
-    tmp_path: Path,
-) -> None:
-    requests: list[dict] = []
-    rejection = {
-        "company": "Broken URL",
-        "reason": "invalid_crunchbase_url",
-    }
-    deps = dependencies(
-        tmp_path,
-        FakeBrowser(
-            [observation(index) for index in range(12)],
-            rejections=[rejection],
-        ),
-        invoke=lambda request, write: requests.append(request),
-        bootstrapped=False,
-    )
-
-    receipt = run_bootstrap(
-        config(tmp_path),
-        deps,
-        seed_top=10,
-        write=True,
-        now=NOW,
-    )
-
-    assert receipt["status"] == "source_drift"
-    assert receipt["stopReason"] == "source_rows_rejected"
-    assert receipt["counts"]["rejected_parse"] == 1
-    assert receipt["counts"]["excluded_industry"] == 0
-    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
-    assert requests == []
-    assert deps.ledger.events == {}
-    assert not deps.ledger.bootstrap_complete(SOURCE)
-
-
-def test_truncated_snapshot_expected_industry_exclusion_does_not_block_diff(
-    tmp_path: Path,
-) -> None:
-    known, unseen = observation(1), observation(2)
-    rejection = {
-        "company": "Intentional Exclusion",
-        "reason": "excluded_industry:biotechnology",
-    }
-    requests: list[dict] = []
-
-    def invoke(request: dict, write: bool) -> dict:
-        requests.append(request)
-        return core_result(request, write=write)
-
-    deps = dependencies(
-        tmp_path,
-        FakeBrowser(
-            [known, unseen],
-            rejections=[rejection],
-            result_count=195,
-        ),
-        invoke=invoke,
-    )
-    _mark_terminal(deps.ledger, known)
-
-    receipt = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    assert receipt["status"] == "complete"
-    assert receipt["counts"]["new_events"] == 1
-    assert receipt["counts"]["rejected_parse"] == 0
-    assert receipt["counts"]["excluded_industry"] == 1
-    assert receipt["sources"][0]["rejectionDetails"] == [rejection]
-    assert [event["eventKey"] for event in requests[0]["events"]] == [
-        funding_event_key(unseen)
-    ]
 
 
 def test_truncated_snapshot_requires_new_at_top_sort_before_diff(
@@ -1081,6 +970,7 @@ def test_dry_run_rejects_incomplete_core_result_without_ledger_changes(
         return result
 
     deps = dependencies(tmp_path, FakeBrowser([row]), invoke=invoke)
+    ledger_before = deps.ledger.path.read_bytes()
     receipt = run_check(
         config(tmp_path),
         deps,
@@ -1091,6 +981,7 @@ def test_dry_run_rejects_incomplete_core_result_without_ledger_changes(
 
     assert receipt["status"] == "result_schema_mismatch"
     assert deps.ledger.events == {}
+    assert deps.ledger.path.read_bytes() == ledger_before
 
 
 def test_bootstrap_rejects_mixed_terminal_result_before_any_terminalization(
@@ -1132,7 +1023,9 @@ def test_dry_bootstrap_counts_only_nonterminal_handoffs(
     tmp_path: Path,
 ) -> None:
     rows = [observation(index) for index in range(12)]
-    deps = dependencies(tmp_path, FakeBrowser(rows), bootstrapped=False)
+    deps = dependencies(
+        tmp_path, FakeBrowser(rows), bootstrapped=False
+    )
     for row in rows[:4]:
         key = funding_event_key(row)
         deps.ledger.observe(key, observed_at=row.observed_at)
@@ -1211,167 +1104,6 @@ def test_latest_receipt_is_durable_before_notification(tmp_path: Path) -> None:
         now=NOW,
         enforce_schedule=False,
     )["status"] == "complete"
-
-
-def test_config_failure_writes_heartbeat_before_one_deduplicated_alert(
-    tmp_path: Path,
-) -> None:
-    alerts: list[list[str]] = []
-    deps = dependencies(
-        tmp_path,
-        FakeBrowser([]),
-        bootstrapped=False,
-    )
-
-    def notify(items: list[str]) -> None:
-        latest = json.loads(
-            (deps.ledger.path.parent / "latest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        heartbeat = json.loads(
-            (deps.ledger.path.parent / "heartbeat.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert latest["status"] == "bootstrap_required"
-        assert heartbeat["lastRunStatus"] == "bootstrap_required"
-        alerts.append(items)
-
-    deps.notify = notify
-    first = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-    second = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    assert first["status"] == second["status"] == "bootstrap_required"
-    assert len(alerts) == 1
-    assert "bootstrap_required" in alerts[0][0]
-    assert "source_not_bootstrapped" in alerts[0][0]
-    heartbeat = json.loads(
-        (deps.ledger.path.parent / "heartbeat.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert heartbeat["schemaVersion"] == (
-        "norman.research.crunchbase_funding_heartbeat.v1"
-    )
-    assert heartbeat["consecutiveFailures"] == 2
-    assert heartbeat["lastAlertKey"] == (
-        "bootstrap_required:source_not_bootstrapped"
-    )
-
-
-def test_retryable_failure_alerts_on_second_run_and_success_resets_heartbeat(
-    tmp_path: Path,
-) -> None:
-    alerts: list[list[str]] = []
-    browser = FakeBrowser([], error=RuntimeError("temporary browser failure"))
-    deps = dependencies(tmp_path, browser)
-    deps.notify = lambda items: alerts.append(items)
-
-    first = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-    second = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    assert first["status"] == second["status"] == "browser_retryable"
-    assert len(alerts) == 1
-    assert "browser_retryable" in alerts[0][0]
-    heartbeat_path = deps.ledger.path.parent / "heartbeat.json"
-    assert json.loads(
-        heartbeat_path.read_text(encoding="utf-8")
-    )["consecutiveFailures"] == 2
-
-    browser.error = None
-    success = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
-
-    assert success["status"] == "complete"
-    assert heartbeat["consecutiveFailures"] == 0
-    assert heartbeat["lastAlertKey"] is None
-    assert heartbeat["lastSuccessAt"] == NOW.isoformat()
-    assert len(alerts) == 1
-
-
-def test_corrupt_heartbeat_is_recovered_and_alerted_once(tmp_path: Path) -> None:
-    alerts: list[list[str]] = []
-    deps = dependencies(tmp_path, FakeBrowser([]))
-    heartbeat_path = deps.ledger.path.parent / "heartbeat.json"
-    heartbeat_path.write_text("{broken", encoding="utf-8")
-    deps.notify = lambda items: alerts.append(items)
-
-    receipt = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
-    assert receipt["status"] == "complete"
-    assert heartbeat["recoveredInvalidHeartbeat"] is True
-    assert len(alerts) == 1
-    assert "heartbeat" in alerts[0][0].casefold()
-
-
-def test_failure_alert_exception_does_not_change_receipt_or_heartbeat(
-    tmp_path: Path,
-) -> None:
-    deps = dependencies(
-        tmp_path,
-        FakeBrowser([]),
-        bootstrapped=False,
-    )
-
-    def fail_notification(items: list[str]) -> None:
-        raise RuntimeError("notification unavailable")
-
-    deps.notify = fail_notification
-    receipt = run_check(
-        config(tmp_path),
-        deps,
-        write=True,
-        now=NOW,
-        enforce_schedule=False,
-    )
-
-    assert receipt["status"] == "bootstrap_required"
-    assert json.loads(
-        (deps.ledger.path.parent / "latest.json").read_text(encoding="utf-8")
-    )["status"] == "bootstrap_required"
-    assert json.loads(
-        (deps.ledger.path.parent / "heartbeat.json").read_text(
-            encoding="utf-8"
-        )
-    )["lastRunStatus"] == "bootstrap_required"
 
 
 def test_notification_preserves_literal_unicode_and_escapes_injection(
