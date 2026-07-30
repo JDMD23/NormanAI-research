@@ -19,6 +19,10 @@ from lib.funding_watcher_state import funding_event_key
 
 RESEARCH_ROOT = Path(__file__).resolve().parents[1]
 CORE_ACCEPTANCE_ENV = "NORMAN_CRM_CORE_ACCEPTANCE_PATH"
+CORE_REQUIRED_ENV = "NORMAN_REQUIRE_CROSS_REPO"
+CORE_COMPATIBILITY_PATH = (
+    RESEARCH_ROOT / "config" / "core-compatibility.json"
+)
 NEW_YORK_ACCEPTANCE_TIME = "2026-07-29T10:15:00-04:00"
 SHARED_RELATIVE_ROOT = Path(
     "Library/Application Support/NormanAI/shared"
@@ -172,6 +176,16 @@ def _resolve_core_root() -> Path | None:
     return None
 
 
+def _handle_missing_core_checkout() -> None:
+    message = (
+        f"cross-repository acceptance requires {CORE_ACCEPTANCE_ENV} "
+        "or a validated sibling Core checkout"
+    )
+    if os.environ.get(CORE_REQUIRED_ENV) == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 @pytest.fixture(scope="module")
 def core_root() -> Path:
     try:
@@ -179,10 +193,8 @@ def core_root() -> Path:
     except ValueError as exc:
         pytest.fail(str(exc))
     if resolved is None:
-        pytest.skip(
-            f"cross-repository acceptance requires {CORE_ACCEPTANCE_ENV} "
-            "or a validated sibling Core checkout"
-        )
+        _handle_missing_core_checkout()
+        raise AssertionError("missing Core checkout handler returned")
     return resolved
 
 
@@ -466,6 +478,52 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
             "reason": "no_hard_match",
         }
     ]
+
+
+def test_pinned_core_commit_and_schema_constants_match(
+    tmp_path: Path,
+    core_root: Path,
+) -> None:
+    compatibility = json.loads(
+        CORE_COMPATIBILITY_PATH.read_text(encoding="utf-8")
+    )
+    pinned_commit = compatibility["commit"]
+    assert len(pinned_commit) == 40
+    assert all(character in "0123456789abcdef" for character in pinned_commit)
+
+    ancestor = subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            pinned_commit,
+            "HEAD",
+        ],
+        cwd=core_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert ancestor.returncode == 0, (
+        f"pinned Core commit {pinned_commit} is not available in or is not "
+        f"an ancestor of {core_root}; stderr={ancestor.stderr!r}"
+    )
+
+    core_contract = _probe(
+        core_root,
+        (
+            "import json\n"
+            "from scripts import crm_funding_handoff as module\n"
+            "print(json.dumps({\n"
+            "  'request': module.REQUEST_SCHEMA_VERSION,\n"
+            "  'result': module.RESULT_SCHEMA_VERSION,\n"
+            "}))\n"
+        ),
+        tmp_path / "schema-home",
+    )
+    assert compatibility["requestSchemaVersion"] == core_contract["request"]
+    assert compatibility["resultSchemaVersion"] == core_contract["result"]
 
 
 @pytest.mark.parametrize(

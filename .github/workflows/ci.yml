@@ -25,3 +25,74 @@ jobs:
               json.loads(p.read_text())
               print('ok', p)
           "
+
+  cross-repository-acceptance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NORMAN_REQUIRE_CROSS_REPO: "1"
+      NORMAN_CRM_CORE_ACCEPTANCE_PATH: ${{ github.workspace }}/core
+    steps:
+      - name: Mint read-only Core checkout token
+        id: core-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.NORMANAI_CROSS_REPO_APP_ID }}
+          private-key: ${{ secrets.NORMANAI_CROSS_REPO_APP_PRIVATE_KEY }}
+          owner: JDMD23
+          repositories: NormanAI-crm-core
+      - name: Check out Research
+        uses: actions/checkout@v4
+        with:
+          path: research
+      - name: Read pinned Core commit
+        id: core-pin
+        working-directory: research
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("config/core-compatibility.json").read_text()
+          )
+          print(f"sha={payload['commit']}")
+          PY
+      - name: Check out pinned Core
+        uses: actions/checkout@v4
+        with:
+          repository: JDMD23/NormanAI-crm-core
+          ref: ${{ steps.core-pin.outputs.sha }}
+          token: ${{ steps.core-token.outputs.token }}
+          path: core
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test deps
+        run: pip install pytest
+      - name: Run mandatory cross-repository contract
+        working-directory: research
+        run: |
+          python3 -m pytest tests/test_cross_repo_coordination.py \
+            --junitxml=cross-repo-results.xml -q
+      - name: Prove all acceptance cases ran
+        working-directory: research
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("cross-repo-results.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {
+              name: sum(int(suite.attrib.get(name, 0)) for suite in suites)
+              for name in ("tests", "failures", "errors", "skipped")
+          }
+          assert totals == {
+              "tests": 10,
+              "failures": 0,
+              "errors": 0,
+              "skipped": 0,
+          }, totals
+          PY

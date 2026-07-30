@@ -1,4 +1,4 @@
-# Setup — the two things you have to do
+# Setup — the external things you have to do
 
 Everything else is built. These are the two blockers.
 
@@ -93,6 +93,35 @@ python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
 
 The installer refuses feature worktrees, a missing bootstrap, a mismatched Core
 contract, or a still-present Core watcher plist.
+
+---
+
+## 3. Required cross-repository CI
+
+Research's release-safety suite checks the real Core CLI, shared browser lock,
+shared 25-page ledger, and schema constants. CI checks out the exact Core
+commit declared in `config/core-compatibility.json`; when
+`NORMAN_REQUIRE_CROSS_REPO=1`, a missing Core checkout is a test failure rather
+than a skip.
+
+Create an organization-owned GitHub App with access to
+`JDMD23/NormanAI-crm-core` only. Grant it `Contents: Read`; GitHub supplies
+`Metadata: Read` automatically. Give it no write, Actions, pull-request,
+package, or administration permission. Install it only on Core, then configure
+these Research Actions secrets:
+
+- `NORMANAI_CROSS_REPO_APP_ID`
+- `NORMANAI_CROSS_REPO_APP_PRIVATE_KEY`
+
+The workflow mints a short-lived installation token and never passes it to
+test code. The test process receives only the local Core checkout path.
+
+In Research branch protection, make the
+`cross-repository-acceptance` job a required status check. This repository
+change cannot set organization secrets, install the GitHub App, or change
+branch protection; an administrator must do those three actions before relying
+on the gate. A compatible Core change requires a reviewed update to the pinned
+40-character commit and the two declared schema versions.
 
 ---
 
