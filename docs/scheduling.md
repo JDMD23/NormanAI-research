@@ -10,14 +10,12 @@ New York times every day:
 |---:|---|
 | 06:00, 10:00, 13:00, 16:00, 19:00 ET | `python3 scripts/funding_watcher.py check --write --yes --enforce-schedule` |
 
-Each scheduled source may reserve at most two pages. All Core and Research
-Crunchbase work shares one 40-work-item ledger per New York day. The ledger
-enforces separate allocations: 30 Core company sessions and ten Research
-saved-list page checks. The five scheduled two-page watcher runs therefore
-fit exactly without Core being able to consume their allocation:
+Each scheduled source reserves exactly two pages or stops before browser
+access. All Core and Research Crunchbase work shares one ceiling of 25 page
+reservations per New York day:
 
 - browser lease: `~/Library/Application Support/NormanAI/shared/browser.lock`
-- work-item ledger: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
+- page budget: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
 
 State and immutable receipts live under
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
@@ -28,6 +26,7 @@ The exact durable artifacts are:
 - `handoffs/<runId>.request.json` — typed request handed to Core
 - `handoffs/<runId>.result.json` — durable Core result
 - `latest.json` — replaceable summary of the latest run
+- `heartbeat.json` — replaceable health, last-success, failure, and alert state
 - `migration-receipt.json` — proof of the read-only legacy import
 
 An event moves `observed → handoff_pending → terminal` only after a validated
@@ -44,6 +43,18 @@ status-bearing run receipt. CLI argument/config failures and migration failures
 report through stderr and their exit code; successful migration writes the
 separate `migration-receipt.json`, which has no run `status`.
 
+A scheduled check cannot reserve pages until every configured source has a
+completed bootstrap marker. `bootstrap_required/source_not_bootstrapped`
+returns exit 78 without browser access and leaves the slot open. Actionable row
+rejections likewise fail closed; intentional industry exclusions are counted
+and receipt-visible but do not make an otherwise trusted snapshot ambiguous.
+
+Heartbeat publication occurs after the immutable receipt and `latest.json`,
+and before notification. Configuration failures notify on the first new
+status/reason; retryable failures notify on the second consecutive occurrence;
+unchanged alerts are deduplicated until success or a different failure.
+Notification is best-effort and never changes the ledger.
+
 The generic Crunchbase source is disabled. Broader Research browser work is
 offset to **07:15 and 14:15** so it does not collide with the strict watcher.
 
@@ -58,6 +69,8 @@ python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
 `status` verifies that the installed plist exists and the service is loaded.
 `uninstall` bootouts the service before removing the plist and preserves
 watcher state and logs.
+
+The repository does not install or activate this service automatically.
 
 ## Broader daily discovery
 
