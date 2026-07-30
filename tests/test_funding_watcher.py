@@ -1213,6 +1213,167 @@ def test_latest_receipt_is_durable_before_notification(tmp_path: Path) -> None:
     )["status"] == "complete"
 
 
+def test_config_failure_writes_heartbeat_before_one_deduplicated_alert(
+    tmp_path: Path,
+) -> None:
+    alerts: list[list[str]] = []
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser([]),
+        bootstrapped=False,
+    )
+
+    def notify(items: list[str]) -> None:
+        latest = json.loads(
+            (deps.ledger.path.parent / "latest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        heartbeat = json.loads(
+            (deps.ledger.path.parent / "heartbeat.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert latest["status"] == "bootstrap_required"
+        assert heartbeat["lastRunStatus"] == "bootstrap_required"
+        alerts.append(items)
+
+    deps.notify = notify
+    first = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+    second = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert first["status"] == second["status"] == "bootstrap_required"
+    assert len(alerts) == 1
+    assert "bootstrap_required" in alerts[0][0]
+    assert "source_not_bootstrapped" in alerts[0][0]
+    heartbeat = json.loads(
+        (deps.ledger.path.parent / "heartbeat.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert heartbeat["schemaVersion"] == (
+        "norman.research.crunchbase_funding_heartbeat.v1"
+    )
+    assert heartbeat["consecutiveFailures"] == 2
+    assert heartbeat["lastAlertKey"] == (
+        "bootstrap_required:source_not_bootstrapped"
+    )
+
+
+def test_retryable_failure_alerts_on_second_run_and_success_resets_heartbeat(
+    tmp_path: Path,
+) -> None:
+    alerts: list[list[str]] = []
+    browser = FakeBrowser([], error=RuntimeError("temporary browser failure"))
+    deps = dependencies(tmp_path, browser)
+    deps.notify = lambda items: alerts.append(items)
+
+    first = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+    second = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert first["status"] == second["status"] == "browser_retryable"
+    assert len(alerts) == 1
+    assert "browser_retryable" in alerts[0][0]
+    heartbeat_path = deps.ledger.path.parent / "heartbeat.json"
+    assert json.loads(
+        heartbeat_path.read_text(encoding="utf-8")
+    )["consecutiveFailures"] == 2
+
+    browser.error = None
+    success = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+
+    assert success["status"] == "complete"
+    assert heartbeat["consecutiveFailures"] == 0
+    assert heartbeat["lastAlertKey"] is None
+    assert heartbeat["lastSuccessAt"] == NOW.isoformat()
+    assert len(alerts) == 1
+
+
+def test_corrupt_heartbeat_is_recovered_and_alerted_once(tmp_path: Path) -> None:
+    alerts: list[list[str]] = []
+    deps = dependencies(tmp_path, FakeBrowser([]))
+    heartbeat_path = deps.ledger.path.parent / "heartbeat.json"
+    heartbeat_path.write_text("{broken", encoding="utf-8")
+    deps.notify = lambda items: alerts.append(items)
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "complete"
+    assert heartbeat["recoveredInvalidHeartbeat"] is True
+    assert len(alerts) == 1
+    assert "heartbeat" in alerts[0][0].casefold()
+
+
+def test_failure_alert_exception_does_not_change_receipt_or_heartbeat(
+    tmp_path: Path,
+) -> None:
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser([]),
+        bootstrapped=False,
+    )
+
+    def fail_notification(items: list[str]) -> None:
+        raise RuntimeError("notification unavailable")
+
+    deps.notify = fail_notification
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "bootstrap_required"
+    assert json.loads(
+        (deps.ledger.path.parent / "latest.json").read_text(encoding="utf-8")
+    )["status"] == "bootstrap_required"
+    assert json.loads(
+        (deps.ledger.path.parent / "heartbeat.json").read_text(
+            encoding="utf-8"
+        )
+    )["lastRunStatus"] == "bootstrap_required"
+
+
 def test_notification_preserves_literal_unicode_and_escapes_injection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
