@@ -5,17 +5,9 @@ on:
     branches: ["**"]
   pull_request:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: research-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,7 +28,6 @@ jobs:
 
   cross-repository-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: read
     env:

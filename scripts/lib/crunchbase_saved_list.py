@@ -164,16 +164,13 @@ def load_watcher_config(path: Path) -> dict[str, Any]:
         "scheduledMaxPagesPerSource",
         "bootstrapMaxPagesPerSource",
         "bootstrapSeedTop",
-        "sharedWorkItemCeiling",
-        "researchDailyCheckLimit",
+        "dailyPageLoadCeiling",
     ):
         _positive_int(payload, key)
     if payload["scheduledMaxPagesPerSource"] > 2:
         raise ValueError("scheduledMaxPagesPerSource must not exceed 2")
-    if payload["sharedWorkItemCeiling"] != 40:
-        raise ValueError("sharedWorkItemCeiling must equal 40")
-    if payload["researchDailyCheckLimit"] != 10:
-        raise ValueError("researchDailyCheckLimit must equal 10")
+    if payload["dailyPageLoadCeiling"] != 25:
+        raise ValueError("dailyPageLoadCeiling must equal 25")
     for key in ("stateDirectory", "legacyStateDirectory", "crmResultSchemaVersion"):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
