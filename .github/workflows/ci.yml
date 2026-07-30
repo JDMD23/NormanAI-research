@@ -67,6 +67,12 @@ jobs:
           token: ${{ steps.core-token.outputs.token }}
           path: core
           fetch-depth: 0
+      - name: Prove pinned Core commit is merged
+        working-directory: core
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor \
+            "${{ steps.core-pin.outputs.sha }}" origin/main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
