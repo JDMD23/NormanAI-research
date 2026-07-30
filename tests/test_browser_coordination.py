@@ -22,10 +22,10 @@ from lib.browser_coordination import (
 NEW_YORK = ZoneInfo("America/New_York")
 
 
-def _claim(args: tuple[str, str]) -> int:
-    path, lane = args
+def _claim(args: tuple[str, str, int]) -> int:
+    path, lane, hour = args
     return DailyCrunchbaseBudget(Path(path)).claim(
-        datetime(2026, 7, 29, 10, tzinfo=NEW_YORK),
+        datetime(2026, 7, 29, hour, tzinfo=NEW_YORK),
         requested=2,
         lane=lane,
     )
@@ -87,11 +87,11 @@ def test_concurrent_budget_claims_never_exceed_40(tmp_path: Path) -> None:
     context = multiprocessing.get_context("fork")
     with context.Pool(20) as pool:
         args = [
-            (str(path), "crm_crunchbase")
+            (str(path), "crm_crunchbase", 10)
             for _index in range(15)
         ] + [
-            (str(path), "research-funding-watcher")
-            for _index in range(5)
+            (str(path), "research-funding-watcher", hour)
+            for hour in (6, 10, 13, 16, 19)
         ]
         results = [pool.apply_async(_claim, (item,)) for item in args]
         grants = [result.get(timeout=10) for result in results]
@@ -110,10 +110,10 @@ def test_core_and_research_daily_allocations_are_atomic(
 
     assert budget.claim(now, requested=30, lane="crm_crunchbase") == 30
     assert budget.claim(now, requested=1, lane="crm_crunchbase") == 0
-    for _index in range(4):
+    for hour in (6, 10, 13, 16):
         assert (
             budget.claim(
-                now,
+                now.replace(hour=hour),
                 requested=2,
                 lane="research-funding-watcher",
             )
@@ -137,6 +137,31 @@ def test_unknown_lane_is_rejected(tmp_path: Path) -> None:
             datetime(2026, 7, 30, 10, tzinfo=NEW_YORK),
             requested=1,
             lane="typo-lane",
+        )
+
+
+def test_malformed_persisted_watcher_slot_lane_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "budget.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "norman.shared.crunchbase_budget.v3",
+                "date": "2026-07-30",
+                "ceiling": 40,
+                "used": 2,
+                "lanes": {
+                    "research-funding-watcher@not-a-slot": 2
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    budget = DailyCrunchbaseBudget(path)
+    with pytest.raises(RuntimeError, match="invalid shared Crunchbase"):
+        budget.snapshot(
+            datetime(2026, 7, 30, 10, tzinfo=NEW_YORK)
         )
 
 

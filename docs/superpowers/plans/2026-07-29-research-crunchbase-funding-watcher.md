@@ -1,5 +1,9 @@
 # Research Crunchbase Funding Watcher Implementation Plan
 
+> Historical implementation plan. Its original 25-page protocol was
+> superseded by the implemented v3 shared ledger: 40 total work items, 30
+> Core company sessions, and ten Research checks across five two-check slots.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make NormanAI-research read the approved Crunchbase saved list five times daily, detect only new funding events, and hand them to CRM Core without writing Notion.

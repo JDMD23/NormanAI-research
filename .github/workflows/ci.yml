@@ -5,18 +5,36 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: research-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NORMAN_REQUIRE_CROSS_REPO: "1"
+      NORMAN_CRM_CORE_ACCEPTANCE_PATH: ${{ github.workspace }}/crm-core-acceptance
     steps:
       - uses: actions/checkout@v4
+      - name: Check out private CRM Core acceptance dependency
+        uses: actions/checkout@v4
+        with:
+          repository: JDMD23/NormanAI-crm-core
+          path: crm-core-acceptance
+          ssh-key: ${{ secrets.CRM_CORE_READONLY_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install test deps
         run: pip install pytest
       - name: Run tests
-        run: python3 -m pytest tests/ -q
+        run: python3 -m pytest -q
       - name: Check configs parse
         run: |
           python3 -c "

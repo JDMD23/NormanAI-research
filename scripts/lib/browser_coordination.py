@@ -404,7 +404,20 @@ def _require_lane(lane: str) -> str:
 
 
 def _lane_group(lane: str) -> str | None:
-    if lane.startswith(f"{WATCHER_LANE}@"):
+    prefix = f"{WATCHER_LANE}@"
+    if lane.startswith(prefix):
+        try:
+            slot = datetime.fromisoformat(lane.removeprefix(prefix))
+        except ValueError:
+            return None
+        if (
+            slot.tzinfo is None
+            or slot.utcoffset() is None
+            or slot.minute != 0
+            or slot.second != 0
+            or slot.microsecond != 0
+        ):
+            return None
         return "research"
     return LANE_GROUPS.get(lane)
 
