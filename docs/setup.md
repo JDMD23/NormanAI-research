@@ -99,7 +99,7 @@ contract, or a still-present Core watcher plist.
 ## 3. Required cross-repository CI
 
 Research's release-safety suite checks the real Core CLI, shared browser lock,
-shared v3 40-work-item ledger, and schema constants. CI checks out the exact Core
+shared v4 55-work-item ledger, and schema constants. CI checks out the exact Core
 commit declared in `config/core-compatibility.json`; when
 `NORMAN_REQUIRE_CROSS_REPO=1`, a missing Core checkout is a test failure rather
 than a skip.

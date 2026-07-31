@@ -46,8 +46,9 @@ def test_approved_config_has_only_the_exact_source_contract() -> None:
     config = load_watcher_config(CONFIG)
     assert config["enabled"] is True
     assert config["scheduleHours"] == [6, 10, 13, 16, 19]
-    assert config["sharedWorkItemCeiling"] == 40
-    assert config["researchDailyCheckLimit"] == 10
+    assert config["scheduledMaxPagesPerSource"] == 3
+    assert config["sharedWorkItemCeiling"] == 55
+    assert config["researchDailyCheckLimit"] == 15
     assert config["sourceDefinitions"] == (SOURCE,)
 
 

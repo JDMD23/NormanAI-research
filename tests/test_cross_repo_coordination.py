@@ -319,16 +319,16 @@ def test_default_constructors_share_real_lease_and_one_public_v3_budget(
         "2026-07-29T19:05:00-04:00",
     )
     assert [
-        _research_claim(home, now, 2, WATCHER_LANE)
+        _research_claim(home, now, 3, WATCHER_LANE)
         for now in research_times
-    ] == [2, 2, 2, 2, 2]
+    ] == [3, 3, 3, 3, 3]
     assert _core_claim(
         core_root,
         home,
         NEW_YORK_ACCEPTANCE_TIME,
-        30,
+        40,
         "crm_crunchbase",
-    ) == 30
+    ) == 40
     assert _research_claim(
         home, research_times[-1], 1, WATCHER_LANE
     ) == 0
@@ -348,17 +348,17 @@ def test_default_constructors_share_real_lease_and_one_public_v3_budget(
         NEW_YORK_ACCEPTANCE_TIME,
     )
     assert public_state == {
-        "schemaVersion": "norman.shared.crunchbase_budget.v3",
+        "schemaVersion": "norman.shared.crunchbase_budget.v4",
         "date": "2026-07-29",
-        "ceiling": 40,
-        "used": 40,
+        "ceiling": 55,
+        "used": 55,
         "lanes": {
-            "crm_crunchbase": 30,
-            "research-funding-watcher@2026-07-29T06:00:00-04:00": 2,
-            "research-funding-watcher@2026-07-29T10:00:00-04:00": 2,
-            "research-funding-watcher@2026-07-29T13:00:00-04:00": 2,
-            "research-funding-watcher@2026-07-29T16:00:00-04:00": 2,
-            "research-funding-watcher@2026-07-29T19:00:00-04:00": 2,
+            "crm_crunchbase": 40,
+            "research-funding-watcher@2026-07-29T06:00:00-04:00": 3,
+            "research-funding-watcher@2026-07-29T10:00:00-04:00": 3,
+            "research-funding-watcher@2026-07-29T13:00:00-04:00": 3,
+            "research-funding-watcher@2026-07-29T16:00:00-04:00": 3,
+            "research-funding-watcher@2026-07-29T19:00:00-04:00": 3,
         },
     }
     assert (
@@ -370,17 +370,17 @@ def test_scheduled_research_lanes_decorate_and_cap_each_new_york_hour(
     tmp_path: Path,
     core_root: Path,
 ) -> None:
-    """Catches slot decoration or prefix aggregation bypassing the two-page cap."""
+    """Catches slot decoration or prefix aggregation bypassing the three-page cap."""
     home = tmp_path / "scheduled-home"
     ten_o_five = "2026-07-29T10:05:00-04:00"
     ten_fifty_nine = "2026-07-29T10:59:00-04:00"
     one_o_five = "2026-07-29T13:05:00-04:00"
     one_fifty_nine = "2026-07-29T13:59:00-04:00"
 
-    assert _research_claim(home, ten_o_five, 2, WATCHER_LANE) == 2
-    assert _research_claim(home, ten_fifty_nine, 2, WATCHER_LANE) == 0
-    assert _research_claim(home, one_o_five, 2, WATCHER_LANE) == 2
-    assert _research_claim(home, one_fifty_nine, 2, WATCHER_LANE) == 0
+    assert _research_claim(home, ten_o_five, 3, WATCHER_LANE) == 3
+    assert _research_claim(home, ten_fifty_nine, 1, WATCHER_LANE) == 0
+    assert _research_claim(home, one_o_five, 3, WATCHER_LANE) == 3
+    assert _research_claim(home, one_fifty_nine, 1, WATCHER_LANE) == 0
 
     public_state = _probe(
         core_root,
@@ -395,11 +395,11 @@ def test_scheduled_research_lanes_decorate_and_cap_each_new_york_hour(
         if key.startswith(f"{WATCHER_LANE}@")
     }
     assert scheduled_lanes == {
-        "research-funding-watcher@2026-07-29T10:00:00-04:00": 2,
-        "research-funding-watcher@2026-07-29T13:00:00-04:00": 2,
+        "research-funding-watcher@2026-07-29T10:00:00-04:00": 3,
+        "research-funding-watcher@2026-07-29T13:00:00-04:00": 3,
     }
-    assert all(pages <= 2 for pages in scheduled_lanes.values())
-    assert sum(scheduled_lanes.values()) == public_state["used"] == 4
+    assert all(pages <= 3 for pages in scheduled_lanes.values())
+    assert sum(scheduled_lanes.values()) == public_state["used"] == 6
 
 
 def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
@@ -540,9 +540,9 @@ def test_both_repositories_reset_only_a_valid_prior_day_budget(
         "snapshot",
         NEW_YORK_ACCEPTANCE_TIME,
     ) == {
-        "schemaVersion": "norman.shared.crunchbase_budget.v3",
+        "schemaVersion": "norman.shared.crunchbase_budget.v4",
         "date": "2026-07-29",
-        "ceiling": 40,
+        "ceiling": 55,
         "used": 0,
         "lanes": {},
     }

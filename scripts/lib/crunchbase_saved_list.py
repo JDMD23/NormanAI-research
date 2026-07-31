@@ -168,12 +168,12 @@ def load_watcher_config(path: Path) -> dict[str, Any]:
         "researchDailyCheckLimit",
     ):
         _positive_int(payload, key)
-    if payload["scheduledMaxPagesPerSource"] > 2:
-        raise ValueError("scheduledMaxPagesPerSource must not exceed 2")
-    if payload["sharedWorkItemCeiling"] != 40:
-        raise ValueError("sharedWorkItemCeiling must equal 40")
-    if payload["researchDailyCheckLimit"] != 10:
-        raise ValueError("researchDailyCheckLimit must equal 10")
+    if payload["scheduledMaxPagesPerSource"] > 3:
+        raise ValueError("scheduledMaxPagesPerSource must not exceed 3")
+    if payload["sharedWorkItemCeiling"] != 55:
+        raise ValueError("sharedWorkItemCeiling must equal 55")
+    if payload["researchDailyCheckLimit"] != 15:
+        raise ValueError("researchDailyCheckLimit must equal 15")
     for key in ("stateDirectory", "legacyStateDirectory", "crmResultSchemaVersion"):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
