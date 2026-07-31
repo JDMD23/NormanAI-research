@@ -66,11 +66,13 @@ class FakeBrowser:
         rows: list[FundingObservation],
         *,
         rejections: int = 0,
+        exclusions: int = 0,
         result_count: int | None = None,
         error: Exception | None = None,
     ):
         self.rows = rows
         self.rejections = rejections
+        self.exclusions = exclusions
         self.result_count = result_count
         self.error = error
         self.calls: list[int] = []
@@ -96,6 +98,13 @@ class FakeBrowser:
             rejections=tuple(
                 {"company": f"Rejected {i}", "reason": "invalid"}
                 for i in range(self.rejections)
+            ),
+            exclusions=tuple(
+                {
+                    "company": f"Excluded {i}",
+                    "reason": "excluded_industry:biotechnology",
+                }
+                for i in range(self.exclusions)
             ),
         )
 
@@ -873,6 +882,29 @@ def test_truncated_snapshot_parse_rejection_is_ambiguous_and_fails_closed(
     assert receipt["stopReason"] == "ambiguous_truncated_snapshot"
     assert calls == []
     assert deps.ledger.path.read_bytes() == before
+
+
+def test_truncated_snapshot_policy_exclusions_do_not_block_a_terminal_anchor(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(index) for index in range(99)]
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(rows, result_count=195, exclusions=11),
+    )
+    _mark_terminal(deps.ledger, rows[0])
+
+    receipt = run_check(
+        config(tmp_path),
+        deps,
+        write=True,
+        now=NOW,
+        enforce_schedule=False,
+    )
+
+    assert receipt["status"] == "complete"
+    assert receipt["counts"]["rejected_parse"] == 0
+    assert receipt["sources"][0]["excludedPolicy"] == 11
 
 
 def test_truncated_snapshot_requires_new_at_top_sort_before_diff(

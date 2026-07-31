@@ -31,7 +31,12 @@ PAGE_ID = re.compile(
     r"\d+_[a-z]_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}", re.I
 )
-CURRENCIES = {"$": ("USD", 100), "£": ("GBP", 100), "€": ("EUR", 100)}
+CURRENCIES = {
+    "A$": ("AUD", 100),
+    "$": ("USD", 100),
+    "£": ("GBP", 100),
+    "€": ("EUR", 100),
+}
 AMOUNT_SUFFIXES = {"": Decimal(1), "K": Decimal(1_000), "M": Decimal(1_000_000), "B": Decimal(1_000_000_000)}
 DISPLAY_DATE_FORMATS = (
     "%Y-%m-%d",
@@ -91,6 +96,7 @@ class SavedListSnapshot:
     top_funding_date: str | None
     observations: tuple[FundingObservation, ...]
     rejections: tuple[dict[str, str], ...]
+    exclusions: tuple[dict[str, str], ...] = ()
 
 
 class CrunchbaseSavedListBlocked(RuntimeError):
@@ -221,7 +227,7 @@ def _parse_date(value: Any) -> str:
 
 def _parse_amount(value: Any) -> tuple[int, str]:
     raw = _spaces(value)
-    match = re.fullmatch(r"(?P<symbol>[\$£€])\s*(?P<number>\d+(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<suffix>[KMB]?)", raw, flags=re.I)
+    match = re.fullmatch(r"(?P<symbol>A\$|[\$£€])\s*(?P<number>\d+(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<suffix>[KMB]?)", raw, flags=re.I)
     if not match:
         raise ValueError("invalid_funding_amount")
     try:
@@ -341,7 +347,15 @@ def _parse_row(row: Any, source: SavedListDefinition, observed_at: str) -> Fundi
     funding_type = _spaces(row.get("fundingType"))
     if not funding_type: raise ValueError("missing_funding_type")
     amount_minor, currency = _parse_amount(row.get("fundingAmount"))
-    if amount_minor < source.expected_minimum_amount * 100: raise ValueError("funding_amount_outside_source_contract")
+    # The saved-list filter is denominated in USD. Crunchbase converts foreign
+    # amounts before including them, while the table displays the original
+    # currency. Reapplying the USD number to EUR/GBP/AUD would reject rows that
+    # the verified server-side filter correctly admitted.
+    if (
+        currency == "USD"
+        and amount_minor < source.expected_minimum_amount * 100
+    ):
+        raise ValueError("funding_amount_outside_source_contract")
     industries = _string_tuple(row.get("industries")); excluded = _excluded_industry(industries)
     if excluded: raise ValueError(f"excluded_industry:{excluded}")
     total_raw = _spaces(row.get("totalFunding")); total_minor: int | None = None; total_currency = ""
@@ -362,16 +376,21 @@ def parse_saved_list_snapshot(payload: Any, source: SavedListDefinition, observe
     if not isinstance(result_count, int) or isinstance(result_count, bool) or result_count < 0: raise RuntimeError("saved-list contract drift: result_count")
     if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count <= 0: raise RuntimeError("saved-list contract drift: page_count")
     if not isinstance(rows, list): raise RuntimeError("saved-list contract drift: rows")
-    observations: list[FundingObservation] = []; rejections: list[dict[str, str]] = []; identities: set[tuple[str, str, str, int, str]] = set()
+    observations: list[FundingObservation] = []; rejections: list[dict[str, str]] = []; exclusions: list[dict[str, str]] = []; identities: set[tuple[str, str, str, int, str]] = set()
     for row in rows:
         company = _spaces(row.get("company")) if isinstance(row, dict) else ""
         try: observation = _parse_row(row, source, observed_at)
         except ValueError as exc:
-            rejections.append({"company": company, "reason": str(exc)}); continue
+            rejected = {"company": company, "reason": str(exc)}
+            if rejected["reason"].startswith("excluded_industry:"):
+                exclusions.append(rejected)
+            else:
+                rejections.append(rejected)
+            continue
         identity = (observation.crunchbase_url, observation.funding_date, " ".join(observation.funding_type.casefold().split()), observation.funding_amount_minor, observation.funding_currency)
         if identity not in identities:
             identities.add(identity); observations.append(observation)
-    return SavedListSnapshot(source, _source_title(payload.get("title")), _spaces(payload.get("resultType")), bool(payload.get("newAtTop")), _spaces(payload.get("filterText")), result_count, page_count, observations[0].funding_date if observations else None, tuple(observations), tuple(rejections))
+    return SavedListSnapshot(source, _source_title(payload.get("title")), _spaces(payload.get("resultType")), bool(payload.get("newAtTop")), _spaces(payload.get("filterText")), result_count, page_count, observations[0].funding_date if observations else None, tuple(observations), tuple(rejections), tuple(exclusions))
 
 
 def browser_snapshot_javascript(source: SavedListDefinition) -> str:
@@ -380,7 +399,7 @@ def browser_snapshot_javascript(source: SavedListDefinition) -> str:
 const text=e=>((e&&(e.innerText||e.textContent))||"").trim(); const bodyText=document.body?.innerText||"";
 const cells=row=>Array.from(row.querySelectorAll("grid-cell,[role='gridcell'],mat-cell")).map(cell=>({text:text(cell),key:[cell.getAttribute("data-column-id")||"",cell.getAttribute("data-field")||"",cell.getAttribute("aria-label")||"",...Array.from(cell.querySelectorAll("a")).map(a=>a.href||"")].join(" ").toLowerCase(),links:Array.from(cell.querySelectorAll("a")).map(a=>({text:text(a),href:a.href||""}))}));
 const rowElements=Array.from(document.querySelectorAll(".results-container grid-row,[role='row'],mat-row"));
-const rows=rowElements.map(row=>{const all=cells(row), org=row.querySelector("a[href*='/organization/']"); if(!org)return null; const find=p=>all.find(c=>p.test(c.key)); const date=find(/last_funding_at|last funding date/)||all.find(c=>/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}$/.test(c.text)); const type=find(/last_funding_type|last funding type/); const money=all.filter(c=>/^[\$£€][\d,.]+(?:[KMB])?$/i.test(c.text)); const amount=find(/last_funding_total|last funding amount/)||money.find(c=>all.indexOf(c)>all.indexOf(date)); const total=all.find(c=>/funding_total|total funding/.test(c.key)&&!/last_funding_total|last funding amount/.test(c.key))||money.find(c=>c!==amount); const links=all.flatMap(c=>c.links); return {company:text(org),crunchbaseUrl:org.href,website:links.find(a=>/^https?:\/\//.test(a.href)&&!a.href.includes("crunchbase.com")&&!a.href.includes("linkedin.com"))?.href||"",linkedin:links.find(a=>a.href.includes("linkedin.com"))?.href||"",headquarters:find(/location_identifiers|headquarters/)?.text||all[4]?.text||"",founded:find(/founded_on|founded/)?.text||all[9]?.text||"",description:find(/short_description|description/)?.text||all[5]?.text||"",industries:links.filter(a=>a.href.includes("/categories/")).map(a=>a.text),founders:links.filter(a=>a.href.includes("/person/")).map(a=>a.text),investors:(find(/investor_identifiers|top investors/)?.links||all[18]?.links||[]).filter(a=>a.href.includes("/organization/")).map(a=>a.text),fundingDate:date?.text||"",fundingType:type?.text||"",fundingAmount:amount?.text||"",totalFunding:total?.text||"",numberOfFundingRounds:Number(find(/num_funding_rounds|number of funding rounds/)?.text||all[14]?.text||"")||null}; }).filter(Boolean);
+const rows=rowElements.map(row=>{const all=cells(row), org=row.querySelector("a[href*='/organization/']"); if(!org)return null; const find=p=>all.find(c=>p.test(c.key)); const date=find(/last_funding_at|last funding date/)||all.find(c=>/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}$/.test(c.text)); const type=find(/last_funding_type|last funding type/); const money=all.filter(c=>/^(?:A\$|[\$£€])[\d,.]+(?:[KMB])?$/i.test(c.text)); const amount=find(/last_funding_total|last funding amount/)||money.find(c=>all.indexOf(c)>all.indexOf(date)); const total=all.find(c=>/funding_total|total funding/.test(c.key)&&!/last_funding_total|last funding amount/.test(c.key))||money.find(c=>c!==amount); const links=all.flatMap(c=>c.links); return {company:text(org),crunchbaseUrl:org.href,website:links.find(a=>/^https?:\/\//.test(a.href)&&!a.href.includes("crunchbase.com")&&!a.href.includes("linkedin.com"))?.href||"",linkedin:links.find(a=>a.href.includes("linkedin.com"))?.href||"",headquarters:find(/location_identifiers|headquarters/)?.text||all[4]?.text||"",founded:find(/founded_on|founded/)?.text||all[9]?.text||"",description:find(/short_description|description/)?.text||all[5]?.text||"",industries:links.filter(a=>a.href.includes("/categories/")).map(a=>a.text),founders:links.filter(a=>a.href.includes("/person/")).map(a=>a.text),investors:(find(/investor_identifiers|top investors/)?.links||all[18]?.links||[]).filter(a=>a.href.includes("/organization/")).map(a=>a.text),fundingDate:date?.text||"",fundingType:type?.text||"",fundingAmount:amount?.text||"",totalFunding:total?.text||"",numberOfFundingRounds:Number(find(/num_funding_rounds|number of funding rounds/)?.text||all[14]?.text||"")||null}; }).filter(Boolean);
 const livePredicates=Array.from(document.querySelectorAll("predicate")); const filterContainers=livePredicates.length?livePredicates:Array.from(document.querySelectorAll("[data-test*='filter' i],[data-testid*='filter' i],.filter-item,.filter-group"));
 const filters=filterContainers.map(container=>{const field=container.querySelector(".search-field,[aria-label='Last Funding Date'],[aria-label='Last Funding Amount'],label,[data-test*='label' i],[data-testid*='label' i],.filter-label"); const label=field?.getAttribute("aria-label")||text(field); const controls=Array.from(container.querySelectorAll("input,button,[role='combobox'],mat-select")); const input=controls.find(control=>control.tagName==="INPUT"); const operator=text(container.querySelector(".mat-mdc-select-min-line"))||controls.map(control=>text(control)||control.getAttribute("aria-label")||"").find(value=>/after|before|greater than|at least|>=|</i.test(value))||""; let value=input?.value||""; if(label==="Last Funding Amount"&&/^[\d,.]+$/.test(value))value="$"+value; return {label,operator,value};}).filter(filter=>filter.label);
 const resultTypeControl=document.querySelector("[data-test='result-type'],[data-testid='result-type'],[aria-label='Result type'],[aria-label='Search type'],[role='tablist'][aria-label*='result' i] [role='tab'][aria-selected='true']")||Array.from(document.querySelectorAll("button.visible-item.visible-item-active")).find(control=>["COMPANIES","CONTACTS","INVESTORS"].includes(text(control).toUpperCase()));
@@ -513,11 +532,12 @@ class CrunchbaseSavedListBrowser:
                     if cleanup is None: cleanup = exc
                 if cleanup is not None and not failed: raise cleanup
         if not snapshots: raise CrunchbaseSavedListDrift("saved-list returned no snapshots")
-        observations: list[FundingObservation] = []; rejections: list[dict[str, str]] = []; seen: set[tuple[str, str, str, int, str]] = set()
+        observations: list[FundingObservation] = []; rejections: list[dict[str, str]] = []; exclusions: list[dict[str, str]] = []; seen: set[tuple[str, str, str, int, str]] = set()
         for snapshot in snapshots:
             rejections.extend(snapshot.rejections)
+            exclusions.extend(snapshot.exclusions)
             for row in snapshot.observations:
                 identity = (row.crunchbase_url, row.funding_date, " ".join(row.funding_type.casefold().split()), row.funding_amount_minor, row.funding_currency)
                 if identity not in seen: seen.add(identity); observations.append(row)
         first = snapshots[0]
-        return SavedListSnapshot(source, first.title, first.result_type, first.new_at_top, first.filter_text, first.result_count, len(snapshots), observations[0].funding_date if observations else None, tuple(observations), tuple(rejections))
+        return SavedListSnapshot(source, first.title, first.result_type, first.new_at_top, first.filter_text, first.result_count, len(snapshots), observations[0].funding_date if observations else None, tuple(observations), tuple(rejections), tuple(exclusions))

@@ -77,19 +77,62 @@ def test_snapshot_parses_eur_without_conversion(payload: dict) -> None:
     assert (result.observations[0].funding_amount_minor, result.observations[0].funding_currency) == (500_000_000, "EUR")
 
 
+def test_snapshot_accepts_foreign_amounts_using_the_server_side_usd_filter(payload: dict) -> None:
+    euro = {
+        **payload["rows"][0],
+        "company": "Float",
+        "crunchbaseUrl": "https://www.crunchbase.com/organization/float",
+        "fundingAmount": "€4,500,000",
+    }
+    aud = {
+        **payload["rows"][0],
+        "company": "Quinbrook",
+        "crunchbaseUrl": "https://www.crunchbase.com/organization/quinbrook",
+        "fundingAmount": "A$469,000,000",
+    }
+
+    result = parse_saved_list_snapshot(
+        {**payload, "rows": [euro, aud]}, SOURCE, OBSERVED_AT
+    )
+
+    assert [
+        (row.company, row.funding_amount_minor, row.funding_currency)
+        for row in result.observations
+    ] == [
+        ("Float", 450_000_000, "EUR"),
+        ("Quinbrook", 46_900_000_000, "AUD"),
+    ]
+    assert result.rejections == ()
+
+
 @pytest.mark.parametrize(("field", "value", "reason"), [
     ("crunchbaseUrl", "", "missing_crunchbase_url"),
     ("fundingAmount", "Undisclosed", "invalid_funding_amount"),
     ("fundingDate", "Jul 1, 2026", "funding_date_outside_source_contract"),
     ("fundingDate", "Jul 30, 2026", "future_funding_date"),
     ("fundingAmount", "$4.9M", "funding_amount_outside_source_contract"),
-    ("industries", ["Pharmaceuticals"], "excluded_industry:pharmaceuticals"),
 ])
 def test_invalid_rows_are_rejected_without_dropping_other_valid_rows(payload: dict, field: str, value: object, reason: str) -> None:
     bad = {**payload["rows"][0], field: value}
     result = parse_saved_list_snapshot({**payload, "rows": [bad, payload["rows"][1]]}, SOURCE, OBSERVED_AT)
     assert [row.company for row in result.observations] == ["Plend"]
     assert result.rejections == ({"company": "Weave", "reason": reason},)
+
+
+def test_policy_exclusions_are_not_parse_rejections(payload: dict) -> None:
+    excluded = {**payload["rows"][0], "industries": ["Pharmaceuticals"]}
+
+    result = parse_saved_list_snapshot(
+        {**payload, "rows": [excluded, payload["rows"][1]]},
+        SOURCE,
+        OBSERVED_AT,
+    )
+
+    assert [row.company for row in result.observations] == ["Plend"]
+    assert result.rejections == ()
+    assert result.exclusions == (
+        {"company": "Weave", "reason": "excluded_industry:pharmaceuticals"},
+    )
 
 
 @pytest.mark.parametrize("filters", [
