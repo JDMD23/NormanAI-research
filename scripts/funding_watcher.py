@@ -172,7 +172,11 @@ def run_check(
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
             receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
-            covered_rows = len(snapshot.observations) + len(snapshot.rejections)
+            covered_rows = (
+                len(snapshot.observations)
+                + len(snapshot.rejections)
+                + len(snapshot.exclusions)
+            )
             if (
                 not snapshot.new_at_top
                 or snapshot.source.expected_sort.casefold() != "new at top"
@@ -616,6 +620,7 @@ def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
         "pageCount": snapshot.page_count,
         "observations": len(snapshot.observations),
         "rejections": len(snapshot.rejections),
+        "excludedPolicy": len(snapshot.exclusions),
         "topFundingDate": snapshot.top_funding_date,
     }
 
