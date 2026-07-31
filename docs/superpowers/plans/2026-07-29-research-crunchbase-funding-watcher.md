@@ -1,8 +1,8 @@
 # Research Crunchbase Funding Watcher Implementation Plan
 
 > Historical implementation plan. Its original 25-page protocol was
-> superseded by the implemented v3 shared ledger: 40 total work items, 30
-> Core company sessions, and ten Research checks across five two-check slots.
+> superseded by the implemented v4 shared ledger: 55 total work items, 40
+> Core company sessions, and 15 Research checks across five three-check slots.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -21,14 +21,23 @@ DEFAULT_BROWSER_LOCK = _PRODUCTION_SHARED_ROOT / "browser.lock"
 DEFAULT_CRUNCHBASE_BUDGET = (
     _PRODUCTION_SHARED_ROOT / "crunchbase-budget.json"
 )
-BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v3"
+BUDGET_SCHEMA_VERSION = "norman.shared.crunchbase_budget.v4"
 LEGACY_BUDGET_SCHEMAS = {
     "norman.shared.crunchbase_budget.v1": 25,
     "norman.shared.crunchbase_budget.v2": 40,
+    "norman.shared.crunchbase_budget.v3": 40,
 }
-APPROVED_CEILING = 40
+LEGACY_WORK_ITEM_CONTRACTS = {
+    "norman.shared.crunchbase_budget.v3": {
+        "core": 30,
+        "research": 10,
+        "watcher_slot": 2,
+    }
+}
+APPROVED_CEILING = 55
 CORE_NAVIGATION_LIMIT = 5
-GROUP_LIMITS = {"core": 30, "research": 10}
+GROUP_LIMITS = {"core": 40, "research": 15}
+WATCHER_SLOT_LIMIT = 3
 LANE_GROUPS = {
     "crm_crunchbase": "core",
     "research-funding-watcher": "research",
@@ -125,7 +134,7 @@ class DailyCrunchbaseBudget:
             or isinstance(ceiling, bool)
             or ceiling != APPROVED_CEILING
         ):
-            raise ValueError("Crunchbase budget ceiling must equal 40")
+            raise ValueError("Crunchbase budget ceiling must equal 55")
         self.path = _guard_test_state_path(
             path or (shared_state_root() / "crunchbase-budget.json")
         )
@@ -145,12 +154,13 @@ class DailyCrunchbaseBudget:
         if not isinstance(exact, bool):
             raise ValueError("exact must be boolean")
         group = _require_lane(lane)
-        if lane == WATCHER_LANE and requested > 2:
+        if lane == WATCHER_LANE and requested > WATCHER_SLOT_LIMIT:
             raise ValueError(
-                "funding watcher may reserve at most 2 checks"
+                "funding watcher may reserve at most 3 checks"
             )
         with self._locked():
             payload = self._payload_for(now)
+            contract = _work_item_contract(payload["schemaVersion"])
             accounting_lane = lane
             lane_remaining = payload["ceiling"]
             if lane == WATCHER_LANE:
@@ -162,12 +172,17 @@ class DailyCrunchbaseBudget:
                     payload["lanes"].get(lane, 0)
                     + payload["lanes"].get(accounting_lane, 0)
                 )
-                lane_remaining = max(0, 2 - lane_used)
+                slot_limit = (
+                    int(contract["watcher_slot"])
+                    if contract is not None
+                    else WATCHER_SLOT_LIMIT
+                )
+                lane_remaining = max(0, slot_limit - lane_used)
             available = payload["ceiling"] - payload["used"]
-            if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
+            if contract is not None:
                 available = min(
                     available,
-                    GROUP_LIMITS[group] - _group_used(payload, group),
+                    int(contract[group]) - _group_used(payload, group),
                 )
             available = min(available, lane_remaining)
             granted = (
@@ -191,16 +206,18 @@ class DailyCrunchbaseBudget:
         with self._locked():
             payload = self._payload_for(now)
             schema_version = str(payload["schemaVersion"])
+            contract = _work_item_contract(schema_version)
             requested = (
                 1
-                if schema_version == BUDGET_SCHEMA_VERSION
+                if contract is not None
                 else CORE_NAVIGATION_LIMIT
             )
             available = payload["ceiling"] - payload["used"]
-            if schema_version == BUDGET_SCHEMA_VERSION:
+            if contract is not None:
                 available = min(
                     available,
-                    GROUP_LIMITS["core"] - _group_used(payload, "core"),
+                    int(contract["core"])
+                    - _group_used(payload, "core"),
                 )
             if available < requested:
                 return CoreCompanyReservation(
@@ -227,7 +244,8 @@ class DailyCrunchbaseBudget:
     def capacity(self, now: datetime) -> dict[str, Any]:
         payload = self.snapshot(now)
         total_remaining = payload["ceiling"] - payload["used"]
-        if payload["schemaVersion"] != BUDGET_SCHEMA_VERSION:
+        contract = _work_item_contract(payload["schemaVersion"])
+        if contract is None:
             return {
                 "schemaVersion": payload["schemaVersion"],
                 "unit": "legacy_pages",
@@ -261,7 +279,10 @@ class DailyCrunchbaseBudget:
                     "limit": limit,
                     "remaining": limit - _group_used(payload, group),
                 }
-                for group, limit in GROUP_LIMITS.items()
+                for group, limit in (
+                    ("core", int(contract["core"])),
+                    ("research", int(contract["research"])),
+                )
             },
         }
 
@@ -363,17 +384,31 @@ def _validate_budget(payload: dict[str, Any]) -> date:
         or sum(lanes.values()) != used
     ):
         raise RuntimeError("invalid shared Crunchbase budget values")
-    if payload["schemaVersion"] == BUDGET_SCHEMA_VERSION:
+    contract = _work_item_contract(payload["schemaVersion"])
+    if contract is not None:
         if any(_lane_group(name) is None for name in lanes):
             raise RuntimeError("invalid shared Crunchbase lane")
         if any(
             _group_used(payload, group) > limit
-            for group, limit in GROUP_LIMITS.items()
+            for group, limit in (
+                ("core", int(contract["core"])),
+                ("research", int(contract["research"])),
+            )
         ):
             raise RuntimeError(
                 "invalid shared Crunchbase allocation"
             )
     return parsed_date
+
+
+def _work_item_contract(schema_version: str) -> dict[str, int] | None:
+    if schema_version == BUDGET_SCHEMA_VERSION:
+        return {
+            "core": GROUP_LIMITS["core"],
+            "research": GROUP_LIMITS["research"],
+            "watcher_slot": WATCHER_SLOT_LIMIT,
+        }
+    return LEGACY_WORK_ITEM_CONTRACTS.get(schema_version)
 
 
 def _require_aware(now: datetime) -> None:
