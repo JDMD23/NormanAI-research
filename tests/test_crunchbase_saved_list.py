@@ -265,6 +265,73 @@ process.stdout.write(eval(javascript));
     assert snapshot["newAtTop"] is False
 
 
+def test_browser_snapshot_reads_current_crunchbase_control_markup() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the generated browser snapshot")
+    harness = r"""
+const fs = require("fs");
+const javascript = fs.readFileSync(0, "utf8");
+const element = (value, attributes = {}, querySelector = () => null) => ({
+  innerText: value,
+  textContent: value,
+  tagName: attributes.tagName || "DIV",
+  value: attributes.value || "",
+  className: attributes.class || "",
+  getAttribute: name => attributes[name] || null,
+  querySelector,
+  querySelectorAll: () => [],
+});
+const activeCompanies = element("Companies", {
+  tagName: "BUTTON",
+  class: "visible-item visible-item-active",
+});
+const switchButton = element("", {
+  tagName: "BUTTON",
+  role: "switch",
+  "aria-checked": "true",
+});
+const newAtTop = element(
+  "New at top",
+  {tagName: "MAT-SLIDE-TOGGLE"},
+  selector => selector.includes("role='switch'") ? switchButton : null,
+);
+global.location = {href: process.argv[1]};
+global.document = {
+  title: "Main Funding - July 2026 - Crunchbase",
+  readyState: "complete",
+  body: {innerText: "Companies New at top 0 results"},
+  querySelectorAll: selector => {
+    if (selector === "button.visible-item.visible-item-active") {
+      return [activeCompanies];
+    }
+    if (selector === "mat-slide-toggle") {
+      return [newAtTop];
+    }
+    return [];
+  },
+  querySelector: selector => {
+    if (selector.includes("saved-search-name")) {
+      return element("Main Funding - July 2026");
+    }
+    return null;
+  },
+};
+process.stdout.write(eval(javascript));
+"""
+    completed = subprocess.run(
+        [node, "-e", harness, SOURCE.url],
+        input=browser_snapshot_javascript(SOURCE),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    snapshot = json.loads(completed.stdout)
+
+    assert snapshot["resultType"] == "Companies"
+    assert snapshot["newAtTop"] is True
+
+
 class FakeTransport:
     def __init__(self, states: list[dict]) -> None:
         self.states, self.opened, self.reset_urls, self.closed, self.restored = list(states), [], [], [], False
