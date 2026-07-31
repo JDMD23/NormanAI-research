@@ -2,9 +2,9 @@
 
 ## Strict funding watcher
 
-The Research-owned LaunchAgent label is
-`com.normanai.research.crunchbase-funding-watcher`. It runs at these local
-New York times every day:
+The Research-owned Codex automation is
+`research-crunchbase-funding-watcher`. It runs at these local New York times
+every day:
 
 | Slot | Command |
 |---:|---|
@@ -47,17 +47,11 @@ separate `migration-receipt.json`, which has no run `status`.
 The generic Crunchbase source is disabled. Broader Research browser work is
 offset to **07:15 and 14:15** so it does not collide with the strict watcher.
 
-Install only after both repos pass acceptance from merged permanent checkouts:
-
-```bash
-python3 scripts/install_funding_watcher_launch_agent.py install --yes
-python3 scripts/install_funding_watcher_launch_agent.py status
-python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
-```
-
-`status` verifies that the installed plist exists and the service is loaded.
-`uninstall` bootouts the service before removing the plist and preserves
-watcher state and logs.
+The automation runs from the permanent Research checkout only after both
+repositories match GitHub and cross-repository acceptance passes. The former
+macOS LaunchAgent is intentionally uninstalled: macOS privacy controls blocked
+it from reading the checkout under `Documents`. Its state and logs remain
+preserved. Do not install a second scheduler beside the Codex automation.
 
 ## Broader daily discovery
 

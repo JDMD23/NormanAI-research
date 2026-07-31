@@ -226,9 +226,11 @@ out that pinned Core commit; checkout does not persist the credential and test
 code receives only the local Core path.
 
 The scheduler is still an activation step, not a consequence of merging this
-code. Do not install or load the LaunchAgent until both repositories are merged
-into permanent checkouts, their required checks pass, and one supervised
-bootstrap/dry-run/write sequence succeeds.
+code. The active scheduler is the Codex automation
+`research-crunchbase-funding-watcher`; the legacy LaunchAgent stays
+uninstalled. Activate or change the Codex schedule only after both repositories
+are merged into permanent checkouts, their required checks pass, and one
+supervised bootstrap/dry-run/write sequence succeeds.
 
 ## 10b. Deliberately deferred funding intelligence
 
