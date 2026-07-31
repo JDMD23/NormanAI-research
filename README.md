@@ -148,7 +148,7 @@ The shared browser lock is
 `~/Library/Application Support/NormanAI/shared/browser.lock`; all Crunchbase
 lanes share the New York-day work-item ledger at
 `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`.
-It enforces 30 Core company sessions and ten Research watcher checks; each
+It enforces 40 Core company sessions and 15 Research watcher checks; each
 Research check is one saved-list page and each Core session has its own
 five-navigation local ceiling.
 

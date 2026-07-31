@@ -21,6 +21,13 @@ def test_live_watcher_config_exposes_expanded_capacity_contract() -> None:
     assert config["researchDailyCheckLimit"] == 15
 
 
+def test_readme_describes_the_v4_shared_capacity_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "40 Core company sessions and 15 Research watcher checks" in readme
+    assert "30 Core company sessions and ten Research watcher checks" not in readme
+
+
 def test_shared_budget_enforces_40_core_plus_15_research(
     tmp_path: Path,
 ) -> None:
