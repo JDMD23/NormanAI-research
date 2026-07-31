@@ -83,16 +83,11 @@ first command is idempotent and refuses any count, source, schema, or key
 mismatch.
 
 After both repositories are merged into permanent checkouts and acceptance is
-clean:
-
-```bash
-python3 scripts/install_funding_watcher_launch_agent.py install --yes
-python3 scripts/install_funding_watcher_launch_agent.py status
-python3 scripts/install_funding_watcher_launch_agent.py uninstall --yes
-```
-
-The installer refuses feature worktrees, a missing bootstrap, a mismatched Core
-contract, or a still-present Core watcher plist.
+clean, activate the Codex automation `research-crunchbase-funding-watcher` for
+06:00, 10:00, 13:00, 16:00, and 19:00 New York time. It must run only the
+guarded `check --write --yes --enforce-schedule` command and must verify both
+production checkouts before browser work. The legacy LaunchAgent remains
+uninstalled so there is exactly one scheduler.
 
 ---
 
