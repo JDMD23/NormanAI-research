@@ -116,6 +116,29 @@ def test_build_handoff_matches_exact_contract_and_preserves_raw_facts() -> None:
     }
 
 
+def test_build_handoff_canonicalizes_or_drops_noncanonical_linkedin_urls() -> None:
+    about = replace(
+        observation("Quinbrook"),
+        crunchbase_url="https://www.crunchbase.com/organization/quinbrook",
+        linkedin=(
+            "https://www.linkedin.com/company/"
+            "quinbrook-infrastructure-partners/about/"
+        ),
+    )
+    malformed = replace(
+        observation("The Fundworks"),
+        crunchbase_url="https://www.crunchbase.com/organization/the-fundworks",
+        linkedin="https://www.linkedin.com/company/linkedin.comthefundworksllc",
+    )
+
+    payload = request_payload(about, malformed)
+
+    assert payload["events"][0]["linkedin"] == (
+        "https://www.linkedin.com/company/quinbrook-infrastructure-partners"
+    )
+    assert payload["events"][1]["linkedin"] == ""
+
+
 def test_build_handoff_rejects_wrong_or_duplicate_keys() -> None:
     row = observation()
     with pytest.raises(ValueError, match="event key"):
