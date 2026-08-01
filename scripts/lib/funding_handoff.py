@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 from lib.crunchbase_saved_list import FundingObservation
 from lib.funding_watcher_state import funding_event_key
@@ -26,6 +28,34 @@ TERMINAL_STATES = {
     "ambiguous_review",
 }
 ROOT = Path(__file__).resolve().parents[2]
+LINKEDIN_COMPANY_PATH = re.compile(
+    r"/company/(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)(?:/about)?/?"
+)
+
+
+def _canonical_linkedin_company_url(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw or any(character.isspace() for character in raw):
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").casefold()
+    match = LINKEDIN_COMPANY_PATH.fullmatch(parsed.path.casefold())
+    if (
+        parsed.scheme.casefold() != "https"
+        or host not in {"linkedin.com", "www.linkedin.com"}
+        or parsed.username
+        or parsed.password
+        or port is not None
+        or parsed.query
+        or parsed.fragment
+        or match is None
+    ):
+        return ""
+    return f"https://www.linkedin.com/company/{match.group('slug')}"
 
 
 def build_handoff(
@@ -56,7 +86,7 @@ def build_handoff(
                 "company": observation.company,
                 "crunchbaseUrl": observation.crunchbase_url,
                 "website": observation.website,
-                "linkedin": observation.linkedin,
+                "linkedin": _canonical_linkedin_company_url(observation.linkedin),
                 "founders": list(observation.founders),
                 "description": observation.description,
                 "founded": observation.founded,
