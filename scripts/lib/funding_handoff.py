@@ -228,6 +228,10 @@ def invoke_crm_handoff(
         str(result_path),
     ]
     command.extend(["--write", "--yes"] if write else ["--dry-run"])
+    raw_dispatcher_fd = str(
+        os.environ.get("NORMANAI_CORE_DISPATCH_FD") or ""
+    ).strip()
+    pass_fds = (int(raw_dispatcher_fd),) if raw_dispatcher_fd else ()
     try:
         completed = subprocess.run(
             command,
@@ -235,6 +239,7 @@ def invoke_crm_handoff(
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
+            pass_fds=pass_fds,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("CRM handoff retryable timeout") from exc
