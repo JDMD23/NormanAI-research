@@ -308,6 +308,38 @@ def test_invoke_uses_absolute_core_cli_and_mode_flags(
     ]
 
 
+def test_invoke_forwards_core_dispatcher_lease_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "Core CRM"
+    script = core / "scripts" / "crm_funding_handoff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    request = request_payload(observation())
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    write_handoff(request_path, request)
+    captured: dict = {}
+    monkeypatch.setenv("NORMANAI_CORE_DISPATCH_FD", "23")
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        payload = result_payload(request, mode="write")
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    invoke_crm_handoff(
+        request_path,
+        result_path,
+        write=True,
+        core_path=core,
+    )
+
+    assert captured["pass_fds"] == (23,)
+
+
 def test_zero_exit_does_not_return_complete_result_with_retryable_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
