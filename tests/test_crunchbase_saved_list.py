@@ -49,7 +49,13 @@ def test_approved_config_has_only_the_exact_source_contract() -> None:
     assert config["scheduledMaxPagesPerSource"] == 3
     assert config["sharedWorkItemCeiling"] == 55
     assert config["researchDailyCheckLimit"] == 15
-    assert config["sourceDefinitions"] == (SOURCE,)
+    assert config["sourceDefinitions"] == (
+        replace(
+            SOURCE,
+            name="Main Funding - August 2026",
+            expected_funding_after="2026-08-01",
+        ),
+    )
 
 
 @pytest.mark.parametrize("url", [
