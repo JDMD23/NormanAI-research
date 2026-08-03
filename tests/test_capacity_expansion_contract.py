@@ -21,6 +21,14 @@ def test_live_watcher_config_exposes_expanded_capacity_contract() -> None:
     assert config["researchDailyCheckLimit"] == 15
 
 
+def test_live_watcher_config_tracks_current_funding_month() -> None:
+    config = load_watcher_config(ROOT / "config/funding-watcher.json")
+    [source] = config["sourceDefinitions"]
+
+    assert source.name == "Main Funding - August 2026"
+    assert source.expected_funding_after == "2026-08-01"
+
+
 def test_readme_describes_the_v4_shared_capacity_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 

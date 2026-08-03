@@ -13,11 +13,11 @@
   "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
   "sources": [
     {
-      "name": "Main Funding - July 2026",
+      "name": "Main Funding - August 2026",
       "url": "https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993",
       "expectedResultType": "Companies",
       "expectedSort": "NEW AT TOP",
-      "expectedFundingAfter": "2026-07-01",
+      "expectedFundingAfter": "2026-08-01",
       "expectedMinimumAmount": 5000000
     }
   ]

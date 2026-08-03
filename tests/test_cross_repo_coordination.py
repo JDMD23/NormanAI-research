@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -419,9 +420,14 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
         ).read_text(encoding="utf-8")
     )
     observed_at = "2026-07-29T14:00:00+00:00"
+    fixture_source = replace(
+        config["sourceDefinitions"][0],
+        name="Main Funding - July 2026",
+        expected_funding_after="2026-07-01",
+    )
     snapshot = parse_saved_list_snapshot(
         snapshot_payload,
-        config["sourceDefinitions"][0],
+        fixture_source,
         observed_at,
     )
     observation = snapshot.observations[0]
