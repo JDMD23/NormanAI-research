@@ -65,7 +65,7 @@ def _osascript(script: str, timeout: int = 30) -> str:
     except subprocess.TimeoutExpired as exc:
         raise PageNotReady("Chrome did not respond in time") from exc
     if proc.returncode:
-        raise ChromeUnavailable(f"Chrome not reachable: {proc.stderr.strip()}")
+        raise ChromeUnavailable("chrome_automation_unreachable")
     return proc.stdout.strip()
 
 

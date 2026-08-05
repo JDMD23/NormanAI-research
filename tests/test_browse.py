@@ -1,6 +1,7 @@
 """Browser lane: the guards that matter, without a Mac or a network call."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,6 +73,23 @@ def test_missing_osascript_is_unavailable_not_a_crash(monkeypatch):
     monkeypatch.setattr(chrome.subprocess, "run", boom)
     with pytest.raises(chrome.ChromeUnavailable):
         chrome._osascript("noop")
+
+
+def test_osascript_failure_exposes_only_bounded_reason_code(monkeypatch):
+    monkeypatch.setattr(
+        chrome.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="secret URL https://example.com/private and script text",
+        ),
+    )
+
+    with pytest.raises(chrome.ChromeUnavailable) as caught:
+        chrome._osascript("tell application \"Google Chrome\"")
+
+    assert str(caught.value) == "chrome_automation_unreachable"
 
 
 def test_live_automation_readiness_accepts_one_javascript_capable_chrome(
