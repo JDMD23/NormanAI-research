@@ -25,7 +25,10 @@ from lib.browser_coordination import (  # noqa: E402
     DailyCrunchbaseBudget,
     SharedBrowserLease,
 )
-from lib.chrome import applescript_string_literal  # noqa: E402
+from lib.chrome import (  # noqa: E402
+    applescript_string_literal,
+    require_automation_ready,
+)
 from lib.crunchbase_saved_list import (  # noqa: E402
     CrunchbaseSavedListBlocked,
     CrunchbaseSavedListBrowser,
@@ -75,6 +78,7 @@ class WatcherDependencies:
     ledger: FundingWatcherLedger
     invoke_handoff: Callable[[dict[str, Any], bool], dict[str, Any]]
     browser_lease: Callable[[], ContextManager[Any]]
+    browser_readiness: Callable[[], None]
     run_lock: Callable[[], ContextManager[bool]]
     notify: Callable[[list[str]], None]
 
@@ -119,30 +123,34 @@ def run_check(
         snapshots = []
         try:
             for source in sources:
-                try:
-                    granted = dependencies.budget.claim(
-                        now,
-                        requested=max_pages,
-                        lane="research-funding-watcher",
-                        exact=True,
-                    )
-                except (ValueError, RuntimeError) as exc:
-                    receipt["error"] = {
-                        "reason": type(exc).__name__,
-                        "evidence": str(exc)[:500],
-                    }
-                    return _finish(
-                        state_root,
-                        receipt,
-                        "budget_state_invalid",
-                        "budget_contract_failed",
-                    )
-                if granted == 0:
-                    return _finish(
-                        state_root, receipt, "budget_exhausted", "no_page_budget"
-                    )
-                receipt["pagesReserved"] += granted
                 with dependencies.browser_lease():
+                    dependencies.browser_readiness()
+                    try:
+                        granted = dependencies.budget.claim(
+                            now,
+                            requested=max_pages,
+                            lane="research-funding-watcher",
+                            exact=True,
+                        )
+                    except (ValueError, RuntimeError) as exc:
+                        receipt["error"] = {
+                            "reason": type(exc).__name__,
+                            "evidence": str(exc)[:500],
+                        }
+                        return _finish(
+                            state_root,
+                            receipt,
+                            "budget_state_invalid",
+                            "budget_contract_failed",
+                        )
+                    if granted == 0:
+                        return _finish(
+                            state_root,
+                            receipt,
+                            "budget_exhausted",
+                            "no_page_budget",
+                        )
+                    receipt["pagesReserved"] += granted
                     snapshots.append(
                         dependencies.browser.read_source(
                             source,
@@ -366,33 +374,34 @@ def run_bootstrap(
         snapshots = []
         try:
             for source in sources:
-                try:
-                    granted = dependencies.budget.claim(
-                        now,
-                        requested=max_pages,
-                        lane="research-funding-bootstrap",
-                        exact=True,
-                    )
-                except (ValueError, RuntimeError) as exc:
-                    receipt["error"] = {
-                        "reason": type(exc).__name__,
-                        "evidence": str(exc)[:500],
-                    }
-                    return _finish(
-                        state_root,
-                        receipt,
-                        "budget_state_invalid",
-                        "budget_contract_failed",
-                    )
-                if granted < max_pages:
-                    return _finish(
-                        state_root,
-                        receipt,
-                        "budget_exhausted",
-                        "incomplete_bootstrap_budget",
-                    )
-                receipt["pagesReserved"] += granted
                 with dependencies.browser_lease():
+                    dependencies.browser_readiness()
+                    try:
+                        granted = dependencies.budget.claim(
+                            now,
+                            requested=max_pages,
+                            lane="research-funding-bootstrap",
+                            exact=True,
+                        )
+                    except (ValueError, RuntimeError) as exc:
+                        receipt["error"] = {
+                            "reason": type(exc).__name__,
+                            "evidence": str(exc)[:500],
+                        }
+                        return _finish(
+                            state_root,
+                            receipt,
+                            "budget_state_invalid",
+                            "budget_contract_failed",
+                        )
+                    if granted < max_pages:
+                        return _finish(
+                            state_root,
+                            receipt,
+                            "budget_exhausted",
+                            "incomplete_bootstrap_budget",
+                        )
+                    receipt["pagesReserved"] += granted
                     snapshots.append(
                         dependencies.browser.read_source(
                             source,
@@ -762,6 +771,7 @@ def _production_dependencies(config: dict[str, Any]) -> WatcherDependencies:
         ledger=ledger,
         invoke_handoff=invoke,
         browser_lease=lambda: SharedBrowserLease(),
+        browser_readiness=require_automation_ready,
         run_lock=lambda: exclusive_run_lock(state_root / "watcher.lock"),
         notify=_notification,
     )

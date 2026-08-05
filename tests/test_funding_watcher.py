@@ -13,7 +13,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import funding_watcher
+from lib import chrome
 from lib.browser_coordination import DailyCrunchbaseBudget
+from lib.browser_coordination import BrowserLeaseUnavailable
 from lib.crunchbase_saved_list import (
     CrunchbaseSavedListBlocked,
     CrunchbaseSavedListDrift,
@@ -213,6 +215,7 @@ def dependencies(
         invoke_handoff=invoke
         or (lambda request, write: core_result(request, write=write)),
         browser_lease=lambda: contextlib.nullcontext(),
+        browser_readiness=lambda: None,
         run_lock=lambda: contextlib.nullcontext(lock_acquired),
         notify=lambda names: None,
     )
@@ -242,6 +245,110 @@ def test_outside_slot_and_disabled_never_touch_budget_or_browser(
     )
     assert receipt["status"] == "disabled"
     assert not browser.calls and not budget.claims
+
+
+def test_browser_lease_refusal_does_not_consume_allowance(tmp_path: Path) -> None:
+    browser, budget = FakeBrowser([]), FakeBudget()
+    deps = dependencies(tmp_path, browser, budget=budget)
+
+    @contextlib.contextmanager
+    def unavailable_lease():
+        raise BrowserLeaseUnavailable("held")
+        yield
+
+    deps.browser_lease = unavailable_lease
+
+    receipt = run_check(
+        config(tmp_path), deps, write=True, now=NOW, enforce_schedule=True
+    )
+
+    assert receipt["status"] == "busy"
+    assert receipt["pagesReserved"] == 0
+    assert budget.claims == []
+    assert browser.calls == []
+
+
+@pytest.mark.parametrize("action", ["check", "bootstrap"])
+def test_browser_readiness_refusal_precedes_allowance_and_source_read(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    browser, budget = FakeBrowser([observation()]), FakeBudget()
+    deps = dependencies(
+        tmp_path,
+        browser,
+        budget=budget,
+        bootstrapped=action == "check",
+    )
+
+    def refuse() -> None:
+        raise chrome.ChromeUnavailable("chrome_instance_count:2")
+
+    deps.browser_readiness = refuse
+    if action == "check":
+        receipt = run_check(
+            config(tmp_path),
+            deps,
+            write=True,
+            now=NOW,
+            enforce_schedule=True,
+        )
+    else:
+        receipt = run_bootstrap(
+            config(tmp_path),
+            deps,
+            seed_top=10,
+            write=True,
+            now=NOW,
+        )
+
+    assert receipt["status"] == "browser_retryable"
+    assert receipt["pagesReserved"] == 0
+    assert receipt["error"] == {
+        "reason": "ChromeUnavailable",
+        "evidence": "chrome_instance_count:2",
+    }
+    assert budget.claims == []
+    assert browser.calls == []
+
+
+def test_success_orders_lease_readiness_allowance_then_source(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    browser, budget = FakeBrowser([]), FakeBudget()
+    deps = dependencies(tmp_path, browser, budget=budget)
+
+    @contextlib.contextmanager
+    def lease():
+        order.append("lease")
+        yield
+
+    def readiness() -> None:
+        order.append("readiness")
+
+    original_claim = budget.claim
+    original_read = browser.read_source
+
+    def claim(*args, **kwargs):
+        order.append("allowance")
+        return original_claim(*args, **kwargs)
+
+    def read(*args, **kwargs):
+        order.append("source")
+        return original_read(*args, **kwargs)
+
+    deps.browser_lease = lease
+    deps.browser_readiness = readiness
+    budget.claim = claim
+    browser.read_source = read
+
+    receipt = run_check(
+        config(tmp_path), deps, write=True, now=NOW, enforce_schedule=True
+    )
+
+    assert receipt["status"] == "complete"
+    assert order == ["lease", "readiness", "allowance", "source"]
 
 
 def test_second_successful_run_in_same_slot_does_no_work(tmp_path: Path) -> None:

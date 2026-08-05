@@ -204,6 +204,14 @@ or open Chrome. The check returns `bootstrap_required` with exit 78 otherwise;
 it does not complete the slot. Bootstrap remains the only path allowed to send
 the top `seedTop` rows and baseline the rest.
 
+For every browser-backed check or bootstrap, Research first acquires the shared
+browser lease and proves that exactly one live Google Chrome application
+process exists, has a window, and accepts a bounded AppleScript JavaScript
+probe. Only then may it atomically reserve saved-list page allowance and read
+the source. A checked Chrome preference is not treated as runtime proof;
+multiple Chrome instances, lease contention, or a live JavaScript refusal stop
+with `pagesReserved = 0`. Recovery never quits or restarts JD's browser.
+
 For a truncated two-page snapshot, a terminal row proves only that the window
 reached known territory. It does not truncate candidate selection: every
 nonterminal valid row in the fetched window is compared and handed off once.

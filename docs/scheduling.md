@@ -19,6 +19,13 @@ fit exactly without Core being able to consume their allocation:
 - browser lease: `~/Library/Application Support/NormanAI/shared/browser.lock`
 - work-item ledger: `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`
 
+The runtime order is strict: acquire the browser lease, prove exactly one live
+Chrome target and working AppleScript JavaScript, reserve the exact allowance,
+then read the saved list. Browser contention or readiness failure therefore
+uses zero allowance and returns a retryable receipt with `pagesReserved = 0`.
+The watcher reports the live process state; it does not infer readiness from
+Chrome's saved menu preference and never restarts the user's browser.
+
 State and immutable receipts live under
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
 The exact durable artifacts are:
