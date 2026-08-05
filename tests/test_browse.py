@@ -74,6 +74,41 @@ def test_missing_osascript_is_unavailable_not_a_crash(monkeypatch):
         chrome._osascript("noop")
 
 
+def test_live_automation_readiness_accepts_one_javascript_capable_chrome(
+    monkeypatch,
+):
+    monkeypatch.setattr(chrome, "_osascript", lambda script, timeout=30: "ready")
+
+    assert chrome.require_automation_ready() is None
+
+
+@pytest.mark.parametrize(
+    ("probe_result", "reason"),
+    [
+        ("instance_count:0", "chrome_instance_count:0"),
+        ("instance_count:2", "chrome_instance_count:2"),
+        ("no_window", "chrome_window_unavailable"),
+        ("javascript_error:12", "chrome_javascript_apple_events_unavailable"),
+    ],
+)
+def test_live_automation_readiness_returns_only_bounded_failure_codes(
+    monkeypatch,
+    probe_result,
+    reason,
+):
+    monkeypatch.setattr(
+        chrome,
+        "_osascript",
+        lambda script, timeout=30: probe_result,
+    )
+
+    with pytest.raises(chrome.ChromeUnavailable) as caught:
+        chrome.require_automation_ready()
+
+    assert str(caught.value) == reason
+    assert "Executing JavaScript" not in str(caught.value)
+
+
 # ----------------------------------------------------------------- extract
 
 def test_extraction_sends_no_search_tools(monkeypatch):

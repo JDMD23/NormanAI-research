@@ -95,6 +95,42 @@ def ensure_chrome_running() -> None:
     )
 
 
+_AUTOMATION_READINESS_SCRIPT = """
+tell application "System Events"
+  set chromeCount to count (every application process whose name is "Google Chrome")
+end tell
+if chromeCount is not 1 then return "instance_count:" & chromeCount
+tell application "Google Chrome"
+  if (count of windows) is 0 then return "no_window"
+  try
+    set probeResult to execute active tab of window 1 javascript "'norman-ready'"
+  on error errorMessage number errorNumber
+    return "javascript_error:" & errorNumber
+  end try
+end tell
+if probeResult is "norman-ready" then return "ready"
+return "javascript_error:unexpected"
+""".strip()
+
+
+def require_automation_ready() -> None:
+    """Prove the live Chrome target is singular and JavaScript-capable."""
+    result = _osascript(_AUTOMATION_READINESS_SCRIPT, timeout=15)
+    if result == "ready":
+        return
+    if result.startswith("instance_count:"):
+        count = result.partition(":")[2]
+        if count.isdigit():
+            raise ChromeUnavailable(f"chrome_instance_count:{count}")
+    if result == "no_window":
+        raise ChromeUnavailable("chrome_window_unavailable")
+    if result.startswith("javascript_error:"):
+        raise ChromeUnavailable(
+            "chrome_javascript_apple_events_unavailable"
+        )
+    raise ChromeUnavailable("chrome_readiness_probe_invalid")
+
+
 def _js(expr: str) -> str:
     """Collapse a JS payload to one line for AppleScript.
 

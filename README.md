@@ -139,18 +139,18 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 
 ## Scheduling
 
-The strict watcher is a Research-owned LaunchAgent at **06:00, 10:00, 13:00,
-16:00, and 19:00 ET**. It is installed only from merged permanent checkouts
-after cross-repository acceptance. The broader browser run is offset to 07:15
-and 14:15.
+The strict watcher runs through the single approved Codex runtime dispatcher at
+**06:00, 10:00, 13:00, 16:00, and 19:00 ET**. The legacy Research LaunchAgent
+must remain uninstalled. The broader browser run is offset to 07:15 and 14:15.
 
 The shared browser lock is
 `~/Library/Application Support/NormanAI/shared/browser.lock`; all Crunchbase
 lanes share the New York-day work-item ledger at
 `~/Library/Application Support/NormanAI/shared/crunchbase-budget.json`.
-It enforces 40 Core company sessions and 15 Research watcher checks; each
-Research check is one saved-list page and each Core session has its own
-five-navigation local ceiling.
+It enforces 40 Core company sessions and 15 Research watcher checks (saved-list
+page checks); each watcher slot reserves exactly three pages and each Core
+session has its own five-navigation local ceiling. The watcher proves the live
+Chrome target and AppleScript JavaScript before making that reservation.
 
 CI runs the search half twice a weekday **without** `--promote` and uploads the
 brief as an artifact — a free canary that can't touch the board.
