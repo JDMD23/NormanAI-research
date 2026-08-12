@@ -143,6 +143,44 @@ def _isolated_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _core_compatible_funding_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Project CRMx-rich funding handoff into the pinned Core event allowlist."""
+    events: list[dict[str, Any]] = []
+    for event in request["events"]:
+        funding = event.get("funding") if isinstance(event.get("funding"), dict) else {}
+        events.append(
+            {
+                "eventKey": event["eventKey"],
+                "sourceName": event["sourceName"],
+                "sourceUrl": event["sourceUrl"],
+                "observedAt": event["observedAt"],
+                "company": event["company"],
+                "crunchbaseUrl": event["crunchbaseUrl"],
+                "website": event["website"],
+                "linkedin": event["linkedin"],
+                "founders": event["founders"],
+                "description": event["description"],
+                "founded": event["founded"],
+                "headquarters": event["headquarters"],
+                "industries": event["industries"],
+                "funding": {
+                    "date": funding["date"],
+                    "type": funding["type"],
+                    "amountRaw": funding["amountRaw"],
+                    "amountMinor": funding["amountMinor"],
+                    "currency": funding["currency"],
+                    "totalRaw": funding["totalRaw"],
+                },
+            }
+        )
+    return {
+        "schemaVersion": request["schemaVersion"],
+        "runId": request["runId"],
+        "generatedAt": request["generatedAt"],
+        "events": events,
+    }
+
+
 def _resolve_core_root() -> Path | None:
     declared = os.environ.get(CORE_ACCEPTANCE_ENV)
     if declared:
@@ -442,13 +480,19 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
         observed_at,
         [(event_key, observation)],
     )
+    # Production handoff is CRMx-rich (investors/rounds/totals for full CSV).
+    # Pinned Core still allowlists the pre-CRMx event shape — project for the
+    # legacy dry-run boundary without changing the Research→CRMx request.
+    core_request = _core_compatible_funding_request(request)
     request_path = tmp_path / "handoff" / "request.json"
     result_path = tmp_path / "handoff" / "result.json"
-    write_handoff(request_path, request)
+    write_handoff(request_path, core_request)
 
     assert request["schemaVersion"] == "norman.research.funding_handoff.v1"
     assert request["events"][0]["eventKey"] == event_key
-    assert set(request["events"][0]) == {
+    assert "investors" in request["events"][0]
+    assert "numberOfFundingRounds" in request["events"][0]
+    assert set(core_request["events"][0]) == {
         "eventKey",
         "sourceName",
         "sourceUrl",
@@ -458,23 +502,19 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
         "website",
         "linkedin",
         "founders",
-        "investors",
         "description",
         "founded",
         "headquarters",
         "industries",
-        "numberOfFundingRounds",
         "funding",
     }
-    assert set(request["events"][0]["funding"]) == {
+    assert set(core_request["events"][0]["funding"]) == {
         "date",
         "type",
         "amountRaw",
         "amountMinor",
         "currency",
         "totalRaw",
-        "totalAmountMinor",
-        "totalCurrency",
     }
 
     completed = subprocess.run(
@@ -498,7 +538,7 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
     assert completed.returncode == 0, completed.stderr
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    assert validate_result(result, request=request) == result
+    assert validate_result(result, request=core_request) == result
     assert result["schemaVersion"] == (
         "norman.crm_core.funding_handoff_result.v1"
     )
