@@ -1,31 +1,42 @@
 """Where candidates go when research is done with them.
 
-Two sinks ship today:
+Sinks that ship today:
 
-  csv       — writes the hydrated intake CSV that NormanAI-crm-core's
-              `crm_intake.py` consumes. This is the contract of record.
-  promote   — invokes `crm_intake.py` on that CSV so rows land on the board
-              with no human step.
+  csv (legacy) — hydrated intake CSV for the explicit crm-core shim.
+  csv (crmx)   — Crunchbase-export-shaped CSV for NormanAI-CRMx ingest_csv.
+  evidence     — versioned JSON sidecar (nyc_evidence, source_urls, keyword_hits).
+  promote      — invokes CRMx `norman.tools.ingest_csv` (default) or legacy
+                 `crm_intake.py` behind an explicit flag.
 
-Deliberately absent: a Notion writer. `crm_intake.py` is the single writer to
-Norman CRM Core and it does the hard dedup. Adding a second writer here would
-create exactly the two-boards-fighting problem the operating contract warns
-about. The workspace D1 queue is keyed on a Notion page id, so it cannot
-accept a company that has no row yet — creation must go through intake first.
+Deliberately absent: a Notion writer. CRMx is the sole system of truth; Research
+proposes into CRMx intake and never writes Notion as SoR. The optional Notion
+read in `notion_existing_keys()` is a courtesy pre-filter only.
 """
 
 from __future__ import annotations
 
 import csv
 import json
-import urllib.error
+import shutil
+import subprocess
+import sys
 import urllib.request
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from lib.candidates import CSV_COLUMNS, Candidate
-from lib.config import ROOT, crm_core_path, load_env_key, research_config
+from lib.candidates import CRMX_CSV_COLUMNS, CSV_COLUMNS, Candidate
+from lib.config import (
+    ROOT,
+    crm_core_path,
+    crmx_db_path,
+    crmx_path,
+    load_env_key,
+    promote_target,
+    research_config,
+)
+
+PROMOTE_TARGETS = frozenset({"crmx", "legacy_crm_core"})
 
 
 class SinkError(RuntimeError):
@@ -33,7 +44,7 @@ class SinkError(RuntimeError):
 
 
 def write_intake_csv(candidates: list[Candidate], out_path: Path | None = None) -> Path:
-    """Write the CSV `crm_intake.py --csv` expects. Returns the path written."""
+    """Write the legacy crm-core CSV. Kept for the explicit legacy shim."""
     cfg = research_config()["sink"]["csv"]
     if out_path is None:
         name = cfg["filenamePattern"].format(date=date.today().isoformat())
@@ -48,43 +59,216 @@ def write_intake_csv(candidates: list[Candidate], out_path: Path | None = None) 
     return out_path
 
 
-def write_evidence(candidates: list[Candidate], out_path: Path | None = None) -> Path:
-    """Sidecar JSON holding why each company was picked.
-
-    The CSV carries only fields intake understands. Signals, NYC proof, and
-    source URLs would be dropped on the floor otherwise, and those are the part
-    a human needs to audit a bad batch.
-    """
+def write_crmx_intake_csv(
+    candidates: list[Candidate], out_path: Path | None = None
+) -> Path:
+    """Write the Crunchbase-shaped CSV CRMx `ingest_csv` expects."""
+    cfg = research_config()["sink"]["csv"]
     if out_path is None:
-        out_path = ROOT / "out" / f"research-evidence-{date.today().isoformat()}.json"
+        pattern = cfg.get("crmxFilenamePattern") or "research-crmx-intake-{date}.csv"
+        name = pattern.format(date=date.today().isoformat())
+        out_path = ROOT / cfg["outDir"] / name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CRMX_CSV_COLUMNS)
+        writer.writeheader()
+        for cand in candidates:
+            writer.writerow(cand.crmx_csv_row())
+    return out_path
+
+
+def write_evidence(candidates: list[Candidate], out_path: Path | None = None) -> Path:
+    """Versioned sidecar JSON holding why each company was picked.
+
+    CRMx's public intake today is CSV-only; nyc_evidence / source_urls /
+    keyword_hits would otherwise be dropped. The sidecar is the handoff
+    contract for that evidence until CRMx grows a richer ingest lane.
+    """
+    evidence_cfg = (research_config().get("sink") or {}).get("evidence") or {}
+    schema = evidence_cfg.get("schemaVersion") or "norman.research.crmx_evidence.v1"
+    if out_path is None:
+        pattern = evidence_cfg.get("filenamePattern") or (
+            "research-evidence-{date}.json"
+        )
+        out_dir = evidence_cfg.get("outDir") or "out"
+        out_path = ROOT / out_dir / pattern.format(date=date.today().isoformat())
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schemaVersion": schema,
         "generated_at": date.today().isoformat(),
         "count": len(candidates),
         "candidates": [c.as_dict() for c in candidates],
+        "note": (
+            "Research qualification evidence for CRMx. Not a Fit score. "
+            "CRMx owns SoR writes; this file is a propose-side artifact."
+        ),
     }
     out_path.write_text(json.dumps(payload, indent=2, default=str))
     return out_path
 
 
-def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
-    """Hand the CSV to crm-core's crm_intake.py and let it create the rows.
+def resolve_promote_target(
+    *,
+    promote: bool = False,
+    legacy: bool = False,
+    configured: str | None = None,
+) -> str | None:
+    """Return the promote target, or None when promotion is off.
 
-    This is how research "automatically adds to CRM Core" without becoming a
-    second Notion writer: we invoke the one writer rather than reimplementing
-    it. Intake keeps its hard dedup, its Need-* seeding, and its receipt.
+    Fail-closed: unknown targets raise. Legacy requires an explicit opt-in
+    (`legacy=True` or configured target `legacy_crm_core`).
     """
-    import subprocess
+    cfg = research_config().get("promote") or {}
+    enabled = bool(promote or cfg.get("enabled"))
+    if not enabled and not legacy:
+        return None
+    if legacy:
+        return "legacy_crm_core"
+    target = promote_target(configured)
+    if target not in PROMOTE_TARGETS:
+        raise SinkError(
+            f"unknown promote.target={target!r}; expected one of "
+            f"{sorted(PROMOTE_TARGETS)}. Fail closed — refusing to guess a writer."
+        )
+    return target
 
+
+def promote(
+    csv_path: Path,
+    *,
+    evidence_path: Path | None = None,
+    target: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Dispatch promote to CRMx (default) or the explicit legacy crm-core shim."""
+    resolved = target or resolve_promote_target(promote=True)
+    if resolved is None:
+        raise SinkError("promote called but promotion is disabled")
+    if resolved == "crmx":
+        return promote_via_crmx(
+            csv_path, evidence_path=evidence_path, dry_run=dry_run
+        )
+    if resolved == "legacy_crm_core":
+        return promote_via_legacy_crm_core(csv_path, dry_run=dry_run)
+    raise SinkError(
+        f"unknown promote target {resolved!r}; refuse to invent a Notion writer"
+    )
+
+
+def promote_via_crmx(
+    csv_path: Path,
+    *,
+    evidence_path: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Hand the CSV to CRMx's public ingest CLI.
+
+    Documented public surface (NormansBrain batch-runbook, CRMx tip b805e90):
+
+        uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label>
+
+    Fail closed when the CRMx checkout, ingest module, or DB path is missing.
+    Research does not fall back to Notion writes. The evidence sidecar path is
+    recorded in the receipt; CRMx CSV ingest does not consume it today.
+    """
+    cfg = research_config().get("crmx") or {}
+    root = crmx_path()
+    if not root.is_dir():
+        raise SinkError(
+            f"NormanAI-CRMx checkout not found at {root}. Set NORMAN_CRMX_PATH "
+            "or crmx.path in config/research.json. Promote fails closed."
+        )
+
+    module = cfg.get("ingestModule") or "norman.tools.ingest_csv"
+    if not _crmx_module_present(root, module):
+        raise SinkError(
+            f"CRMx ingest module {module!r} not found under {root}. "
+            "Refusing to guess an alternate writer (including Notion). "
+            "See config/crmx-compatibility.json for the adapter contract."
+        )
+
+    db = crmx_db_path()
+    if db is None:
+        raise SinkError(
+            "NORMAN_CRMX_DB (or crmx.dbPath) is unset. CRMx ingest requires the "
+            "SQLite SoR path. Promote fails closed — Research will not write Notion."
+        )
+
+    if dry_run:
+        # Public ingest_csv examples do not document a dry-run flag. Fail closed
+        # rather than inventing --dry-run or silently writing.
+        raise SinkError(
+            "CRMx ingest_csv has no verified dry-run flag; refuse to call it "
+            "under dry_run. Use --write --yes --promote for a real handoff, or "
+            "omit promote and inspect the CSV + evidence sidecar."
+        )
+
+    added_from = (cfg.get("addedFromPattern") or "research:{date}").format(
+        date=date.today().isoformat()
+    )
+    uv_bin = cfg.get("uvBin") or "uv"
+    if shutil.which(uv_bin) is None and not Path(uv_bin).exists():
+        raise SinkError(
+            f"{uv_bin!r} not found on PATH. CRMx promote requires uv to run "
+            f"`{uv_bin} run python -m {module}`."
+        )
+
+    cmd = [
+        uv_bin,
+        "run",
+        "python",
+        "-m",
+        module,
+        str(csv_path.resolve()),
+        str(db),
+        "--added-from",
+        added_from,
+    ]
+    proc = subprocess.run(
+        cmd, cwd=str(root), capture_output=True, text=True, timeout=900
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        raise SinkError(
+            f"CRMx {module} failed ({proc.returncode}): {out[-1500:]}"
+        )
+
+    summary: dict[str, Any] = {
+        "target": "crmx",
+        "command": cmd,
+        "stdout": out[-4000:],
+        "csv": str(csv_path),
+        "evidence": str(evidence_path) if evidence_path else None,
+        "db": str(db),
+        "added_from": added_from,
+        "counts": _parse_crmx_counts(out),
+        "note": (
+            "Evidence sidecar was NOT passed to ingest_csv (CSV-only public "
+            "surface). CRMx should ingest the sidecar via a future adapter; "
+            "see config/crmx-compatibility.json."
+        ),
+    }
+    return summary
+
+
+def promote_via_legacy_crm_core(
+    csv_path: Path, dry_run: bool = False
+) -> dict[str, Any]:
+    """Explicit legacy shim: invoke crm-core's crm_intake.py.
+
+    Ordinary `--promote` does not use this path. Pass
+    `--promote-legacy-crm-core` or set promote.target=legacy_crm_core.
+    """
     core = crm_core_path()
     script = core / "scripts" / "crm_intake.py"
     if not script.exists():
         raise SinkError(
-            f"crm_intake.py not found at {script}. Promotion needs the "
-            "NormanAI-crm-core checkout — set crmCore.path in config/research.json."
+            f"crm_intake.py not found at {script}. Legacy promotion needs the "
+            "NormanAI-crm-core checkout — set crmCore.path or NORMAN_CRM_CORE_PATH."
         )
 
-    cmd = ["python3", str(script), "--csv", str(csv_path)]
+    cmd = [sys.executable, str(script), "--csv", str(csv_path)]
     cmd += ["--dry-run"] if dry_run else ["--write", "--yes"]
 
     proc = subprocess.run(
@@ -94,9 +278,12 @@ def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
     if proc.returncode != 0:
         raise SinkError(f"crm_intake.py failed ({proc.returncode}): {out[-1500:]}")
 
-    # Intake writes its own receipt; surface it rather than reparsing stdout.
     receipt = core / "state" / "intake_latest.json"
-    summary: dict[str, Any] = {"stdout": out[-4000:], "receipt": str(receipt)}
+    summary: dict[str, Any] = {
+        "target": "legacy_crm_core",
+        "stdout": out[-4000:],
+        "receipt": str(receipt),
+    }
     try:
         summary["counts"] = json.loads(receipt.read_text()).get("counts")
     except (OSError, json.JSONDecodeError):
@@ -104,12 +291,56 @@ def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
     return summary
 
 
+# Back-compat name used by older call sites / tests.
+def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
+    """Deprecated alias — dispatches through the configured promote target."""
+    return promote(csv_path, dry_run=dry_run)
+
+
+def _crmx_module_present(root: Path, module: str) -> bool:
+    """Best-effort check that the ingest module exists in the CRMx checkout."""
+    parts = module.split(".")
+    # Prefer src-layout, then flat package layout.
+    candidates = [
+        root.joinpath("src", *parts),
+        root.joinpath(*parts),
+    ]
+    for base in candidates:
+        if base.with_suffix(".py").is_file():
+            return True
+        if (base / "__init__.py").is_file() or (base / "__main__.py").is_file():
+            return True
+    # Also accept a tools/ingest_csv.py layout mentioned in the task brief.
+    if (root / "tools" / "ingest_csv.py").is_file() and module.endswith(
+        "ingest_csv"
+    ):
+        return True
+    if (root / "core" / "intake.py").is_file() and "intake" in module:
+        return True
+    return False
+
+
+def _parse_crmx_counts(output: str) -> dict[str, Any] | None:
+    """Best-effort parse of ingest stdout; never invents Fit scores."""
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload.get("counts") or payload
+    return None
+
+
 def notion_existing_keys() -> set[str]:
-    """Read-only pre-filter: identity keys already on the CRM Core board.
+    """Read-only pre-filter: identity keys already on the operator board.
 
     Returns an empty set (never raises) when the token is missing or Notion is
     unreachable — a failed pre-filter must degrade to "emit and let intake
-    dedup", not to dropping a run on the floor.
+    dedup", not to dropping a run on the floor. Never writes.
     """
     from lib.identity import identity_key  # local import keeps module import cheap
 

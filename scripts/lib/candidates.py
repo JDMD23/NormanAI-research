@@ -1,11 +1,14 @@
-"""Candidate model: what Grok returns, and the intake CSV row.
+"""Candidate model: what Grok returns, and the intake CSV rows.
 
-There is deliberately no scoring here. Research finds and qualifies; crm-core's
-score agent scores after intake, with enriched inputs it can actually trust.
+There is deliberately no scoring here. Research finds and qualifies;
+NormanAI-CRMx scores after intake. Research never invents Fit scores.
 
-The CSV column names below are not cosmetic — they are matched against
-`CSV_ALIASES` in NormanAI-crm-core's `scripts/crm_intake.py`. Renaming a column
-here silently drops that field on intake. Test coverage pins them.
+Two CSV shapes ship:
+
+  CSV_COLUMNS      — legacy NormanAI-crm-core `crm_intake.py` aliases (shim only).
+  CRMX_CSV_COLUMNS — Crunchbase-export headers CRMx `norman.tools.ingest_csv`
+                     was built against (NormansBrain CSV mapping). Evidence
+                     fields are NOT in either CSV; they live in the JSON sidecar.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from typing import Any
 from lib.config import load_config
 from lib.identity import identity_key, normalize_domain, x_handle_url
 
-# Order matters: this is the CSV header, and it mirrors crm_intake.py's aliases.
+# Order matters: legacy crm-core intake aliases (explicit --promote-legacy-crm-core).
 CSV_COLUMNS = [
     "Company",
     "Website",
@@ -36,6 +39,26 @@ CSV_COLUMNS = [
     "Top 5 Investors",
 ]
 
+# Crunchbase-export headers documented as CRMx ingest_csv's intake contract.
+CRMX_CSV_COLUMNS = [
+    "Organization Name",
+    "Organization Name URL",
+    "Headquarters Location",
+    "Founded Date",
+    "Industries",
+    "Last Funding Date",
+    "Last Funding Amount (in USD)",
+    "Description",
+    "Website",
+    "X (Twitter)",
+    "LinkedIn",
+    "Founders",
+    "Number of Funding Rounds",
+    "Last Funding Type",
+    "Total Funding Amount (in USD)",
+    "Top 5 Investors",
+]
+
 HQ_OPTIONS = [
     "NYC", "SF Bay", "LA", "Boston", "Austin", "Seattle", "Chicago",
     "Remote", "Other US", "International", "Unknown",
@@ -52,7 +75,7 @@ def response_schema() -> dict[str, Any]:
     """JSON schema handed to Grok so candidates come back structured.
 
     Every fact is nullable rather than defaulted: an unknown must arrive as null
-    so it can stay unknown. Unknown ≠ 0 is a crm-core rule and it starts here,
+    so it can stay unknown. Unknown ≠ 0 is a CRMx/core rule and it starts here,
     at the point of capture.
     """
     angles = load_config("modes")["nycAngle"]["values"]
@@ -256,7 +279,7 @@ class Candidate:
         }
 
     def csv_row(self) -> dict[str, str]:
-        """Row for the intake CSV. Blank means unknown — never a zero."""
+        """Legacy crm-core intake row. Blank means unknown — never a zero."""
 
         def money(val: float | None) -> str:
             return "" if val is None else f"{val:.0f}"
@@ -277,5 +300,30 @@ class Candidate:
             "Last Funding Type": self.last_funding_type,
             "Total Funding Amount (in USD)": money(self.total_funding_usd),
             "Number of Funding Rounds": "" if self.num_rounds is None else str(self.num_rounds),
+            "Top 5 Investors": self.investors,
+        }
+
+    def crmx_csv_row(self) -> dict[str, str]:
+        """CRMx ingest_csv row (Crunchbase-export headers). Unknown stays blank."""
+
+        def money(val: float | None) -> str:
+            return "" if val is None else f"{val:.0f}"
+
+        return {
+            "Organization Name": self.company,
+            "Organization Name URL": self.crunchbase,
+            "Headquarters Location": self.hq,
+            "Founded Date": self.founded,
+            "Industries": self.industries,
+            "Last Funding Date": self.last_funding_date,
+            "Last Funding Amount (in USD)": money(self.last_funding_usd),
+            "Description": self.one_liner,
+            "Website": self.website,
+            "X (Twitter)": x_handle_url(self.x_handle),
+            "LinkedIn": self.linkedin,
+            "Founders": self.founders,
+            "Number of Funding Rounds": "" if self.num_rounds is None else str(self.num_rounds),
+            "Last Funding Type": self.last_funding_type,
+            "Total Funding Amount (in USD)": money(self.total_funding_usd),
             "Top 5 Investors": self.investors,
         }

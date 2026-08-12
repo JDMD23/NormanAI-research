@@ -1,7 +1,7 @@
 """Config + env loading for NormanAI-research.
 
-Mirrors NormanAI-crm-core's `scripts/lib/config.py` env ladder so a single
-`.env` on the cron host serves both repos.
+Shares the same `.env` ladder as NormanAI-CRMx / legacy crm-core so one file on
+the cron host serves the discovery arm and the system of truth.
 """
 
 from __future__ import annotations
@@ -87,13 +87,60 @@ def sources_config() -> dict:
 
 
 def crm_core_path() -> Path:
-    """Where the NormanAI-crm-core checkout lives, for promotion."""
+    """Where the legacy NormanAI-crm-core checkout lives (explicit shim only)."""
+    override = os.environ.get("NORMAN_CRM_CORE_PATH")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise SystemExit("NORMAN_CRM_CORE_PATH must be absolute")
+        return path.resolve()
     raw = (research_config().get("crmCore") or {}).get("path") or "../NormanAI-crm-core"
     path = Path(raw)
     return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def crmx_path() -> Path:
+    """Where the NormanAI-CRMx checkout lives, for promotion."""
+    cfg = research_config().get("crmx") or {}
+    env_name = cfg.get("pathEnv") or "NORMAN_CRMX_PATH"
+    override = os.environ.get(env_name)
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise SystemExit(f"{env_name} must be absolute")
+        return path.resolve()
+    raw = cfg.get("path") or "../NormanAI-CRMx"
+    path = Path(raw)
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def crmx_db_path() -> Path | None:
+    """SQLite SoR path for CRMx ingest. None when unset (promote must fail closed)."""
+    cfg = research_config().get("crmx") or {}
+    env_name = cfg.get("dbPathEnv") or "NORMAN_CRMX_DB"
+    override = os.environ.get(env_name, "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise SystemExit(f"{env_name} must be absolute")
+        return path.resolve()
+    raw = (cfg.get("dbPath") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def promote_target(explicit: str | None = None) -> str:
+    """Resolve promote target. Unknown values fail closed at the caller."""
+    if explicit:
+        return explicit.strip()
+    raw = (research_config().get("promote") or {}).get("target") or "crmx"
+    return str(raw).strip()
 
 
 def state_path(rel: str) -> Path:
     path = ROOT / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+

@@ -94,8 +94,16 @@ def main() -> int:
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--promote", action="store_true",
-                        help="hand the CSV straight to crm-core's crm_intake.py")
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="hand the CRMx CSV to NormanAI-CRMx ingest_csv (off unless set)",
+    )
+    parser.add_argument(
+        "--promote-legacy-crm-core",
+        action="store_true",
+        help="explicit legacy shim: invoke crm-core crm_intake.py instead of CRMx",
+    )
     parser.add_argument("--show-rejects", action="store_true")
     parser.add_argument("--no-notion-check", action="store_true")
     args = parser.parse_args()
@@ -105,7 +113,9 @@ def main() -> int:
         raise SystemExit("--write requires --yes")
     if args.write and args.dry_run:
         raise SystemExit("use either --write or --dry-run")
-    if args.promote and not args.write:
+    if args.promote and args.promote_legacy_crm_core:
+        raise SystemExit("use either --promote or --promote-legacy-crm-core")
+    if (args.promote or args.promote_legacy_crm_core) and not args.write:
         raise SystemExit("--promote requires --write --yes (it creates CRM rows)")
 
     key_env = research_config()["grok"].get("apiKeyEnv", "XAI_API_KEY")

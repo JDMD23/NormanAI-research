@@ -21,7 +21,9 @@ from lib.identity import hard_match
 from lib.sinks import (
     SinkError,
     notion_existing_keys,
-    promote_via_intake,
+    promote,
+    resolve_promote_target,
+    write_crmx_intake_csv,
     write_evidence,
     write_intake_csv,
 )
@@ -107,7 +109,10 @@ def run(found: list, reports: list[dict], args, *, label: str, slug: str = "") -
 
     known = set() if getattr(args, "no_notion_check", False) else notion_existing_keys()
     if known:
-        print(f"CRM Core pre-filter: {len(known)} companies already on the board", flush=True)
+        print(
+            f"board pre-filter (Notion read-only): {len(known)} companies already present",
+            flush=True,
+        )
 
     fresh: list = []
     on_board = already_sent = no_identity = 0
@@ -160,36 +165,100 @@ def run(found: list, reports: list[dict], args, *, label: str, slug: str = "") -
         }
 
         if getattr(args, "write", False) and fresh:
-            csv_path = write_intake_csv(fresh, ROOT / "out" / f"intake{tag}-{today}.csv")
-            write_evidence(fresh, ROOT / "out" / f"evidence{tag}-{today}.json")
+            legacy_csv = write_intake_csv(
+                fresh, ROOT / "out" / f"intake{tag}-{today}.csv"
+            )
+            crmx_csv = write_crmx_intake_csv(
+                fresh, ROOT / "out" / f"crmx-intake{tag}-{today}.csv"
+            )
+            evidence_path = write_evidence(
+                fresh, ROOT / "out" / f"evidence{tag}-{today}.json"
+            )
             state.mark_emitted(conn, [c.key for c in fresh])
             counts["emitted"] = len(fresh)
-            outcome["csv"] = str(csv_path)
-            print(f"\nwrote {len(fresh)} → {csv_path}", flush=True)
+            outcome["csv"] = str(legacy_csv)
+            outcome["crmx_csv"] = str(crmx_csv)
+            outcome["evidence"] = str(evidence_path)
+            print(f"\nwrote {len(fresh)} → {crmx_csv}", flush=True)
+            print(f"evidence sidecar → {evidence_path}", flush=True)
 
-            if getattr(args, "promote", False) or cfg["promote"].get("enabled"):
+            try:
+                target = resolve_promote_target(
+                    promote=bool(getattr(args, "promote", False)),
+                    legacy=bool(getattr(args, "promote_legacy_crm_core", False)),
+                )
+            except SinkError as exc:
+                outcome["promote_error"] = str(exc)
+                print(f"! promotion failed: {exc}", flush=True)
+                target = None
+
+            if target:
                 cap = cfg["promote"].get("maxPerRun", 25)
                 promotable = fresh[:cap]
+                handoff_csv = crmx_csv if target == "crmx" else legacy_csv
+                handoff_evidence = evidence_path
                 if len(fresh) > cap:
                     print(f"promote: capping {len(fresh)} → {cap}", flush=True)
-                    csv_path = write_intake_csv(
-                        promotable, csv_path.with_name(csv_path.stem + "-promote.csv")
+                    if target == "crmx":
+                        handoff_csv = write_crmx_intake_csv(
+                            promotable,
+                            crmx_csv.with_name(crmx_csv.stem + "-promote.csv"),
+                        )
+                    else:
+                        handoff_csv = write_intake_csv(
+                            promotable,
+                            legacy_csv.with_name(legacy_csv.stem + "-promote.csv"),
+                        )
+                    handoff_evidence = write_evidence(
+                        promotable,
+                        evidence_path.with_name(
+                            evidence_path.stem + "-promote.json"
+                        ),
                     )
                 try:
-                    summary = promote_via_intake(csv_path)
-                    outcome["promote"] = summary["counts"]
+                    summary = promote(
+                        handoff_csv,
+                        evidence_path=handoff_evidence,
+                        target=target,
+                    )
+                    outcome["promote"] = summary.get("counts")
+                    outcome["promote_target"] = target
+                    outcome["promote_detail"] = {
+                        k: summary.get(k)
+                        for k in (
+                            "target",
+                            "csv",
+                            "evidence",
+                            "db",
+                            "added_from",
+                            "note",
+                        )
+                        if k in summary
+                    }
                     print(
-                        f"promoted {len(promotable)} → crm_intake.py: "
-                        f"{json.dumps(summary['counts'])}",
+                        f"promoted {len(promotable)} → {target}: "
+                        f"{json.dumps(summary.get('counts'))}",
                         flush=True,
                     )
+                    if target == "crmx" and handoff_evidence:
+                        print(
+                            f"  evidence sidecar for CRMx ingest (not yet consumed "
+                            f"by ingest_csv): {handoff_evidence}",
+                            flush=True,
+                        )
                 except SinkError as exc:
                     outcome["promote_error"] = str(exc)
                     print(f"! promotion failed: {exc}", flush=True)
             else:
                 print(
-                    "\nnext (in NormanAI-crm-core):\n"
-                    f"  python3 scripts/crm_intake.py --csv {csv_path} --write --yes",
+                    "\nnext (NormanAI-CRMx intake):\n"
+                    f"  export NORMAN_CRMX_PATH=/path/to/NormanAI-CRMx\n"
+                    f"  export NORMAN_CRMX_DB=/path/to/norman.sqlite\n"
+                    f"  (cd \"$NORMAN_CRMX_PATH\" && uv run python -m "
+                    f"norman.tools.ingest_csv {crmx_csv} \"$NORMAN_CRMX_DB\" "
+                    f"--added-from research:{today})\n"
+                    f"  # evidence sidecar (CRMx CSV-only today — do not drop): "
+                    f"{evidence_path}",
                     flush=True,
                 )
 
