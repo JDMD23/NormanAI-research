@@ -4,10 +4,10 @@
   "sourceOfTruth": "NormanAI-CRMx (SQLite). Research is discovery/qualify only — never scores Fit, never writes Notion as SoR.",
   "verifiedPublicIntake": {
     "module": "norman.tools.ingest_csv",
-    "invocation": "uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label>",
-    "evidence": "NormansBrain/reference/batch-runbook.md (grounded at CRMx tip b805e90). Live CRMx checkout was not readable from this agent token (404); adapter fails closed until NORMAN_CRMX_PATH points at a real checkout.",
+    "invocation": "uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label> --evidence <path.json>",
+    "evidence": "CRMx fail-closed evidence ingest (schema norman.research.crmx_evidence.v1). Research promote always passes --evidence; missing sidecar fails closed. See NormanAI-CRMx docs/research-evidence-handoff.md.",
     "csvContract": "Crunchbase-export column names (Organization Name, Website, LinkedIn, …). Research remaps its internal candidate fields into this shape before promote.",
-    "richerIntake": "CRMx public surface today is CSV-only. Research always writes a versioned evidence JSON sidecar (nyc_evidence, source_urls, keyword_hits, signal_notes) beside the CSV. CRMx must grow an ingest path for that sidecar — Research will not invent Notion writes to preserve evidence."
+    "richerIntake": "Research always writes a versioned evidence JSON sidecar (nyc_evidence, source_urls, keyword_hits, signal_notes) beside the CSV and passes it to ingest_csv via --evidence. Research will not invent Notion writes or Fit scores to preserve evidence."
   },
   "evidenceSidecarSchemaVersion": "norman.research.crmx_evidence.v1",
   "fundingHandoff": {

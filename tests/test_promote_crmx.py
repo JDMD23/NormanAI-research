@@ -133,6 +133,36 @@ def test_promote_via_crmx_invokes_uv_module(
     assert calls[0][6] == str(db.resolve())
     assert "--added-from" in calls[0]
     assert calls[0][calls[0].index("--added-from") + 1].startswith("research:")
+    assert "--evidence" in calls[0]
+    assert calls[0][calls[0].index("--evidence") + 1] == str(evidence.resolve())
+    assert "NOT passed" not in (summary.get("note") or "")
+
+
+def test_promote_via_crmx_fails_closed_without_evidence_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    csv_path = write_crmx_intake_csv([_candidate()], tmp_path / "in.csv")
+    with pytest.raises(SinkError, match="requires an evidence sidecar"):
+        promote_via_crmx(csv_path)
+
+
+def test_promote_via_crmx_fails_closed_when_evidence_file_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    csv_path = write_crmx_intake_csv([_candidate()], tmp_path / "in.csv")
+    missing = tmp_path / "missing-evidence.json"
+    with pytest.raises(SinkError, match="evidence sidecar missing"):
+        promote_via_crmx(csv_path, evidence_path=missing)
 
 
 def test_promote_via_crmx_fails_closed_without_db(
@@ -144,7 +174,7 @@ def test_promote_via_crmx_fails_closed_without_db(
     monkeypatch.setitem(config.research_config()["crmx"], "dbPath", "")
     csv_path = write_crmx_intake_csv([_candidate()], tmp_path / "in.csv")
     with pytest.raises(SinkError, match="NORMAN_CRMX_DB"):
-        promote_via_crmx(csv_path)
+        promote_via_crmx(csv_path, evidence_path=tmp_path / "ev.json")
 
 
 def test_promote_via_crmx_fails_closed_without_checkout(
@@ -154,7 +184,7 @@ def test_promote_via_crmx_fails_closed_without_checkout(
     monkeypatch.setenv("NORMAN_CRMX_PATH", str(missing))
     monkeypatch.setenv("NORMAN_CRMX_DB", str(tmp_path / "db.sqlite"))
     with pytest.raises(SinkError, match="checkout not found"):
-        promote_via_crmx(tmp_path / "x.csv")
+        promote_via_crmx(tmp_path / "x.csv", evidence_path=tmp_path / "ev.json")
 
 
 def test_promote_via_crmx_fails_closed_without_module(
@@ -167,7 +197,7 @@ def test_promote_via_crmx_fails_closed_without_module(
     monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
     monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
     with pytest.raises(SinkError, match="ingest module"):
-        promote_via_crmx(tmp_path / "x.csv")
+        promote_via_crmx(tmp_path / "x.csv", evidence_path=tmp_path / "ev.json")
 
 
 def test_promote_via_crmx_refuses_dry_run(
@@ -176,10 +206,11 @@ def test_promote_via_crmx_refuses_dry_run(
     root = _fake_crmx(tmp_path)
     db = tmp_path / "norman.sqlite"
     db.write_text("")
+    evidence = write_evidence([_candidate()], tmp_path / "ev.json")
     monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
     monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
     with pytest.raises(SinkError, match="dry-run"):
-        promote_via_crmx(tmp_path / "x.csv", dry_run=True)
+        promote_via_crmx(tmp_path / "x.csv", evidence_path=evidence, dry_run=True)
 
 
 def test_promote_dispatcher_routes_legacy(
@@ -262,3 +293,7 @@ def test_pipeline_promote_wires_crmx(
     evidence = json.loads(Path(outcome["evidence"]).read_text())
     assert evidence["candidates"][0]["keyword_hits"]
     assert calls and calls[0][4] == "norman.tools.ingest_csv"
+    assert "--evidence" in calls[0]
+    evidence_arg = calls[0][calls[0].index("--evidence") + 1]
+    assert Path(evidence_arg).is_file()
+    assert Path(evidence_arg).resolve() == Path(outcome["evidence"]).resolve()

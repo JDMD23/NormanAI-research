@@ -242,8 +242,8 @@ def run(found: list, reports: list[dict], args, *, label: str, slug: str = "") -
                     )
                     if target == "crmx" and handoff_evidence:
                         print(
-                            f"  evidence sidecar for CRMx ingest (not yet consumed "
-                            f"by ingest_csv): {handoff_evidence}",
+                            f"  evidence sidecar passed via --evidence: "
+                            f"{handoff_evidence}",
                             flush=True,
                         )
                 except SinkError as exc:
@@ -256,9 +256,8 @@ def run(found: list, reports: list[dict], args, *, label: str, slug: str = "") -
                     f"  export NORMAN_CRMX_DB=/path/to/norman.sqlite\n"
                     f"  (cd \"$NORMAN_CRMX_PATH\" && uv run python -m "
                     f"norman.tools.ingest_csv {crmx_csv} \"$NORMAN_CRMX_DB\" "
-                    f"--added-from research:{today})\n"
-                    f"  # evidence sidecar (CRMx CSV-only today — do not drop): "
-                    f"{evidence_path}",
+                    f"--added-from research:{today} "
+                    f"--evidence {evidence_path})\n",
                     flush=True,
                 )
 

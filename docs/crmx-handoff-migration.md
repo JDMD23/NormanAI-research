@@ -9,7 +9,7 @@ as SoR.
 | Path | Before | After |
 |------|--------|-------|
 | Ordinary `--promote` | `crm_intake.py` in NormanAI-crm-core | `uv run python -m norman.tools.ingest_csv` in NormanAI-CRMx |
-| Evidence | JSON sidecar (unaudited by Core) | Versioned sidecar `norman.research.crmx_evidence.v1` (still not consumed by CSV ingest) |
+| Evidence | JSON sidecar (unaudited by Core) | Versioned sidecar `norman.research.crmx_evidence.v1` always passed via `--evidence` |
 | Notion | Never written from Research | Still never written; read-only prefilter optional |
 | Promote default | off (`promote.enabled: false`) | still off |
 
@@ -21,7 +21,7 @@ Discover only (CSV + evidence, no SoR write):
 python3 scripts/daily.py --write --yes
 ```
 
-Promote into CRMx (fail-closed until path + DB are set):
+Promote into CRMx (fail-closed until path + DB + evidence sidecar are set):
 
 ```bash
 export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
@@ -36,8 +36,8 @@ cd "$NORMAN_CRMX_PATH"
 uv run python -m norman.tools.ingest_csv \
   /path/to/research/out/crmx-intake-YYYY-MM-DD.csv \
   "$NORMAN_CRMX_DB" \
-  --added-from research:YYYY-MM-DD
-# Keep out/evidence-YYYY-MM-DD.json — ingest_csv does not read it today.
+  --added-from research:YYYY-MM-DD \
+  --evidence /path/to/research/out/evidence-YYYY-MM-DD.json
 ```
 
 Legacy crm-core shim (temporary, explicit only):
@@ -49,15 +49,20 @@ python3 scripts/daily.py --write --yes --promote-legacy-crm-core
 
 ## Evidence contract (do not drop)
 
-CRMx's verified public intake is **CSV-only** today
-(`norman.tools.ingest_csv`). Research therefore always writes:
+Research always writes:
 
 1. `out/crmx-intake-*.csv` — Crunchbase-export headers for ingest_csv
 2. `out/evidence-*.json` — `norman.research.crmx_evidence.v1` carrying
    `nyc_evidence`, `source_urls`, `keyword_hits`, `signal_notes`, mode/lane
 
-CRMx must grow an adapter (or extend ingest) to load that sidecar into the
-SQLite SoR. Research will **not** invent Notion writes to preserve evidence.
+When `--promote` targets CRMx, Research **always** passes the sidecar:
+
+```text
+uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label> --evidence <path.json>
+```
+
+Promote fails closed if the sidecar path is unset or the file is missing.
+Research will **not** invent Notion writes or Fit scores to preserve evidence.
 
 Pin of the public surface: `config/crmx-compatibility.json`.
 
@@ -76,6 +81,7 @@ Promote raises (and does not write Notion) when:
 - `NORMAN_CRMX_PATH` / `crmx.path` is missing or not a directory
 - `norman.tools.ingest_csv` (or `tools/ingest_csv.py`) is absent in that checkout
 - `NORMAN_CRMX_DB` / `crmx.dbPath` is unset
+- evidence sidecar path is missing or the file does not exist
 - `uv` is not on PATH
 - `promote.target` is anything other than `crmx` or `legacy_crm_core`
 - dry-run promote is requested against CRMx (no verified dry-run flag)
