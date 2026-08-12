@@ -1,27 +1,32 @@
 {
   "schemaVersion": "norman.research.v3",
-  "purpose": "Discovery arm. Finds companies that are growing, raising, hiring in NYC, or under office-space pressure, and hands them to NormanAI-CRMx intake. Research qualifies; it never scores Fit and never writes Notion as SoR.",
+  "purpose": "Discovery arm. Finds companies that are growing, raising, hiring in NYC, or under office-space pressure, and hands them to NormanAI-CRMx intake. Research qualifies; it never scores Fit and never dual-writes Notion MACHINE fields.",
   "downstream": {
     "repo": "NormanAI-CRMx",
     "contract": "docs/research-operating-contract.md §2 / config/crmx-compatibility.json",
-    "writer": "uv run python -m norman.tools.ingest_csv (CRMx)",
-    "scorer": "NormanAI-CRMx (rescore) — never Research",
-    "note": "CRMx is the sole system of truth. Research proposes via CSV + evidence sidecar. Research must not pre-empt scoring or write Notion."
+    "writer": "uv run python -m norman.tools.ingest_csv (ordinary promote) / norman.tools.funding_ingest (funding watcher)",
+    "scorer": "NormanAI-CRMx (score_batch / rescore) — never Research",
+    "funding": "norman.tools.funding_ingest + reconcile_sweep + score_batch cohort",
+    "note": "CRMx SQLite is the sole system of truth. Funding path: Research extract → CRMx SQLite → Notion projection. CSV drop remains CRMx offline fallback only."
   },
   "crmx": {
     "path": "../NormanAI-CRMx",
     "pathEnv": "NORMAN_CRMX_PATH",
     "dbPath": "",
     "dbPathEnv": "NORMAN_CRMX_DB",
+    "db": "data/norman.db",
     "ingestModule": "norman.tools.ingest_csv",
+    "fundingIngestModule": "norman.tools.funding_ingest",
     "addedFromPattern": "research:{date}",
+    "addedFromPrefix": "crunchbase-watcher",
     "uvBin": "uv",
-    "note": "Promotion invokes CRMx's public ingest CLI in the CRMx checkout. Set NORMAN_CRMX_PATH and NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if either is missing or the module is not importable."
+    "note": "Ordinary promote uses ingest_csv + evidence. Funding watcher uses funding_ingest → reconcile_sweep --apply → score_batch for the run cohort. Set NORMAN_CRMX_PATH and NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if missing."
   },
   "crmCore": {
     "path": "../Core CRM",
     "intake": "scripts/crm_intake.py",
     "fundingHandoff": "scripts/crm_funding_handoff.py",
+    "fundingHandoffRetired": true,
     "note": "Legacy only. Ordinary --promote and funding-watcher handoff target CRMx by default. Use --promote-legacy-crm-core / --handoff-legacy-crm-core (or target=legacy_crm_core) explicitly."
   },
   "caps": {

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import shlex
 import stat
 import subprocess
@@ -29,13 +30,11 @@ from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
 LABEL = "com.normanai.research.crunchbase-funding-watcher"
 CORE_LABEL = "com.normanai.crm-core.crunchbase-funding-watcher"
 WATCHER_RELATIVE_PATH = Path("scripts/funding_watcher.py")
-CRMX_INGEST_MODULE = "norman.tools.ingest_csv"
-SCHEDULE = (
-    {"Hour": 6, "Minute": 0},
-    {"Hour": 10, "Minute": 0},
-    {"Hour": 13, "Minute": 0},
-    {"Hour": 16, "Minute": 0},
-    {"Hour": 19, "Minute": 0},
+CORE_HANDOFF_RELATIVE_PATH = Path("scripts/crm_funding_handoff.py")
+SCHEDULE = tuple(
+    {"Weekday": weekday, "Hour": hour, "Minute": 0}
+    for weekday in (1, 2, 3, 4, 5)  # Mon–Fri (launchd: 0=Sun)
+    for hour in (9, 12, 15, 18)
 )
 Runner = Callable[..., Any]
 OK, BAD_ARGS, DEPENDENCY, INTERNAL = 0, 64, 69, 70
@@ -169,61 +168,6 @@ def _bootstrap_complete(ledger: FundingWatcherLedger, source_url: str) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
-def _crmx_module_present(root: Path, module: str) -> bool:
-    parts = module.split(".")
-    for base in (
-        root.joinpath("src", *parts),
-        root.joinpath(*parts),
-    ):
-        if base.with_suffix(".py").is_file():
-            return True
-        if (base / "__init__.py").is_file() or (base / "__main__.py").is_file():
-            return True
-    return (root / "tools" / "ingest_csv.py").is_file() and module.endswith(
-        "ingest_csv"
-    )
-
-
-def _resolve_crmx_root(research_config: dict[str, Any], repo_root: Path) -> Path:
-    crmx = research_config.get("crmx")
-    if not isinstance(crmx, dict):
-        raise RuntimeError("permanent NormanAI-CRMx path is not configured")
-    env_name = str(crmx.get("pathEnv") or "NORMAN_CRMX_PATH")
-    override = (os.environ.get(env_name) or "").strip()
-    if override:
-        path = Path(override).expanduser()
-        if not path.is_absolute():
-            raise RuntimeError(f"{env_name} must be absolute")
-        return path.resolve()
-    raw = crmx.get("path")
-    if not isinstance(raw, str) or not raw.strip():
-        raise RuntimeError("permanent NormanAI-CRMx path is not configured")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = repo_root / path
-    return path.resolve()
-
-
-def _resolve_crmx_db(research_config: dict[str, Any], repo_root: Path) -> Path:
-    crmx = research_config.get("crmx")
-    if not isinstance(crmx, dict):
-        raise RuntimeError("NORMAN_CRMX_DB (or crmx.dbPath) is unset")
-    env_name = str(crmx.get("dbPathEnv") or "NORMAN_CRMX_DB")
-    override = (os.environ.get(env_name) or "").strip()
-    if override:
-        path = Path(override).expanduser()
-        if not path.is_absolute():
-            raise RuntimeError(f"{env_name} must be absolute")
-        return path.resolve()
-    raw = (crmx.get("dbPath") or "").strip()
-    if not raw:
-        raise RuntimeError("NORMAN_CRMX_DB (or crmx.dbPath) is unset")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = repo_root / path
-    return path.resolve()
-
-
 def _prerequisites(
     *,
     repo_root: Path,
@@ -260,27 +204,35 @@ def _prerequisites(
             )
         ):
             return False, "Research funding ledger is not bootstrap-complete"
-        handoff_target = str(watcher_config.get("handoffTarget") or "crmx").strip()
-        if handoff_target != "crmx":
-            return (
-                False,
-                "funding watcher handoffTarget must be crmx for LaunchAgent "
-                "activation (legacy crm-core is explicit CLI only)",
-            )
         if watcher_config.get("crmResultSchemaVersion") != RESULT_SCHEMA_VERSION:
-            return False, "Research funding result schema does not match adapter"
-        crmx_root = _resolve_crmx_root(research_config, root)
+            return False, "Research funding result schemaVersion does not match CRMx handoff"
+        crmx_config = research_config.get("crmx")
+        if not isinstance(crmx_config, dict):
+            return False, "permanent CRMx path is not configured"
+        crmx_value = crmx_config.get("path")
+        if not isinstance(crmx_value, str) or not crmx_value.strip():
+            return False, "permanent CRMx path is not configured"
+        crmx_root = Path(crmx_value).expanduser()
+        if not crmx_root.is_absolute():
+            crmx_root = (root / crmx_root).resolve()
+        else:
+            crmx_root = crmx_root.resolve()
         if not _permanent(crmx_root):
-            return False, "activation requires a permanent NormanAI-CRMx checkout"
-        if not crmx_root.is_dir():
-            return False, "NormanAI-CRMx checkout not found"
-        module = str(
-            (research_config.get("crmx") or {}).get("ingestModule")
-            or CRMX_INGEST_MODULE
-        )
-        if not _crmx_module_present(crmx_root, module):
-            return False, f"CRMx ingest module {module!r} not found"
-        _resolve_crmx_db(research_config, root)
+            return False, "activation requires a permanent CRMx checkout"
+        db_rel = crmx_config.get("db") or "data/norman.db"
+        if not isinstance(db_rel, str) or not db_rel.strip():
+            return False, "CRMx db path is invalid"
+        db_path = Path(db_rel).expanduser()
+        if not db_path.is_absolute():
+            db_path = (crmx_root / db_path).resolve()
+        if not db_path.is_file():
+            return False, f"CRMx SQLite missing: {db_path}"
+        ingest_mod = crmx_root / "src/norman/tools/funding_ingest.py"
+        if not ingest_mod.is_file():
+            return False, "CRMx funding_ingest module is missing"
+        uv_check = _run(runner, ["uv", "--version"])
+        if uv_check.returncode:
+            return False, "uv is required for CRMx funding handoff"
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return False, str(exc)
     return True, ""

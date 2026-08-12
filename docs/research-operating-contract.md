@@ -187,13 +187,16 @@ Guards on promotion, in order:
 
 The only allowlisted source is:
 
-`https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993`
+`https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993`
 
 Research owns source validation, browser reading, the event-key ledger,
-immutable receipts, scheduling, and retry. Mutation goes through CRMx
-`ingest_csv` via `NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB` (fail-closed). The event
-key hashes the exact source URL, canonical Crunchbase organization URL, funding
-date, normalized funding type, integer minor units, and ISO currency.
+immutable receipts, scheduling, and retry. Mutation goes through CRMx SQLite
+(`funding_ingest` → `reconcile_sweep` → narrow `score_batch`) via
+`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB` (fail-closed). Checks run weekdays at
+09/12/15/18 ET and hand off only companies funded today (America/New_York).
+Research never dual-writes Notion MACHINE fields. The event key hashes the
+exact source URL, canonical Crunchbase organization URL, funding date,
+normalized funding type, integer minor units, and ISO currency.
 
 The preserved Core ledger is migrated read-only only when it proves 189 events:
 179 baseline and 10 created under one bootstrap source. Research never marks an

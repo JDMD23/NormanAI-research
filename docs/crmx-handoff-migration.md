@@ -9,7 +9,7 @@ as SoR.
 | Path | Before | After |
 |------|--------|-------|
 | Ordinary `--promote` | `crm_intake.py` in NormanAI-crm-core | `uv run python -m norman.tools.ingest_csv` in NormanAI-CRMx |
-| Funding watcher handoff | `crm_funding_handoff.py` in NormanAI-crm-core | same CRMx `ingest_csv` + evidence adapter |
+| Funding watcher handoff | `crm_funding_handoff.py` in NormanAI-crm-core | CRMx `funding_ingest` → `reconcile_sweep` → narrow `score_batch` |
 | Evidence | JSON sidecar (unaudited by Core) | Versioned sidecar `norman.research.crmx_evidence.v1` always passed via `--evidence` |
 | Notion | Never written from Research | Still never written; read-only prefilter optional |
 | Promote default | off (`promote.enabled: false`) | still off |
@@ -67,53 +67,33 @@ Research will **not** invent Notion writes or Fit scores to preserve evidence.
 
 Pin of the public surface: `config/crmx-compatibility.json`.
 
-## Funding watcher (CRMx adapter)
+## Funding watcher (CRMx SQLite SoR)
 
-The strict Crunchbase funding watcher still emits typed
-`norman.research.funding_handoff.v1` request JSON for the ledger/audit trail.
-Default promote maps that request into CRMx CSV + evidence and calls
-`norman.tools.ingest_csv --evidence` (same public surface as ordinary promote).
+Primary path (Mac live / ADR 0018):
+
+```text
+Chrome saved-search extract (today ET only)
+  → typed funding_handoff.v1 + full Crunchbase CSV
+  → uv run python -m norman.tools.funding_ingest <csv> <db> --added-from crunchbase-watcher:<date>
+  → uv run python -m norman.tools.reconcile_sweep <db> --apply
+  → uv run python -m norman.tools.score_batch <db> --added-from crunchbase-watcher:<date> --all --apply
+```
+
+Notion is projection only via reconcile. Research never dual-writes MACHINE
+props. CRMx CSV drop folders remain offline/manual fallback only.
 
 ```bash
 export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
-export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
+export NORMAN_CRMX_DB=/absolute/path/to/norman.db
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
 ```
 
-Artifacts under the watcher state root:
+Schedule: weekdays **09:00 / 12:00 / 15:00 / 18:00 ET**. Source:
+`main-funding-august-2026/730c458b-…`.
 
-- `handoffs/<runId>.request.json` — typed funding request
-- `handoffs/<runId>.crmx.csv` / `.evidence.json` — CRMx adapter inputs
-- `handoffs/<runId>.result.json` — ledger-compatible result
-
-**No typed CRMx funding CLI was verified** (CRMx repo returned 404 to this
-agent's token). Until CRMx publishes one that returns durable per-event
-terminal states, Research synthesizes
-`norman.crm_core.funding_handoff_result.v1` after successful ingest_csv
-(`state=created`, `pageId=crmx:ingest:<eventKey>`). That synthesis is an
-adapter, not a second SoR.
-
-### CRMx follow-up (typed funding API shape)
-
-Preferred CRMx-side replacement (do not invent from Research):
-
-```text
-uv run python -m norman.tools.ingest_funding_handoff \
-  --handoff <request.json> --result <result.json> --write|--dry-run
-```
-
-Accept `norman.research.funding_handoff.v1`; emit durable per-event terminal
-states (`created`, `queued_existing`, `duplicate_event`, `rejected_identity`,
-`ambiguous_review`) with real SoR ids — then Research can drop result
-synthesis.
-
-Legacy crm-core funding CLI (temporary, explicit only):
-
-```bash
-export NORMAN_CRM_CORE_PATH=/absolute/path/to/Core\ CRM
-python3 scripts/funding_watcher.py check --write --yes --handoff-legacy-crm-core
-```
+Mac live checkout may be `~/Documents/NormanAI-research`; this GitHub repo's
+`scripts/` + `config/` remain the source of truth.
 
 ## Fail-closed rules
 

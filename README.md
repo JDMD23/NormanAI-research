@@ -104,12 +104,13 @@ python3 scripts/funding_watcher.py check --write --yes
 python3 scripts/install_funding_watcher_launch_agent.py status
 ```
 
-It reads only the approved `Main Funding` saved list, fingerprints each funding
-event, writes typed JSON plus CRMx CSV/evidence, and invokes
-`norman.tools.ingest_csv` (`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB`). Research
-never imports a Notion writer. A terminal result closes the event; a retryable
-result remains open for the next run. Legacy Core remains only behind
-`--handoff-legacy-crm-core`.
+It reads the approved `Main Funding - August 2026` saved list, keeps companies
+funded **today** (ET), fingerprints each event, writes typed JSON plus a full
+Crunchbase-shaped CSV, and invokes CRMx `funding_ingest` → `reconcile_sweep`
+→ narrow `score_batch` (`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB`). Research never
+dual-writes Notion MACHINE fields. A terminal result closes the event; a
+retryable result remains open for the next run. CSV drop remains CRMx offline
+fallback only.
 
 The default state root is
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
@@ -137,8 +138,8 @@ Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 | `scripts/research_browse.py` | Browser lanes (Crunchbase + Substack) |
 | `scripts/lib/pipeline.py` | The shared tail: qualify → dedup → emit → brief |
 | `scripts/research_probe.py` | One live call to verify the xAI request shape |
-| `scripts/funding_watcher.py` | Strict saved-list detector and CRM handoff |
-| `config/funding-watcher.json` | Exact source, five slots, caps, and state roots |
+| `scripts/funding_watcher.py` | Strict saved-list detector and CRMx funding ingest handoff |
+| `config/funding-watcher.json` | Exact source, four weekday slots, caps, and state roots |
 | `scripts/lib/qualify.py` | The broad/tight rules |
 | `scripts/lib/discover.py` | Lane execution and the two prompts |
 | `scripts/lib/grok.py` | Agent Tools client (stdlib only) |
@@ -152,7 +153,7 @@ Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 ## Scheduling
 
 The strict watcher runs through the single approved Codex runtime dispatcher at
-**06:00, 10:00, 13:00, 16:00, and 19:00 ET**. The legacy Research LaunchAgent
+**09:00, 12:00, 15:00, and 18:00 ET (weekdays)**. Handoff is CRMx SQLite→Notion projection; the LaunchAgent
 must remain uninstalled. The broader browser run is offset to 07:15 and 14:15.
 
 The shared browser lock is
