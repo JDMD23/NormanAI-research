@@ -188,11 +188,7 @@ def run_check(
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
             receipt["counts"]["rejected_parse"] += len(snapshot.rejections)
-            covered_rows = (
-                len(snapshot.observations)
-                + len(snapshot.rejections)
-                + len(snapshot.exclusions)
-            )
+            covered_rows = _covered_row_count(snapshot)
             if (
                 not snapshot.new_at_top
                 or snapshot.source.expected_sort.casefold() != "new at top"
@@ -441,7 +437,7 @@ def run_bootstrap(
         observations: list[FundingObservation] = []
         for snapshot in snapshots:
             receipt["sources"].append(_snapshot_summary(snapshot))
-            if snapshot.result_count != len(snapshot.observations) + len(snapshot.rejections):
+            if snapshot.result_count != _covered_row_count(snapshot):
                 return _finish(
                     state_root, receipt, "source_drift", "incomplete_bootstrap_coverage"
                 )
@@ -634,6 +630,15 @@ def _publish_detector_receipt(
         "counts": dict(receipt["counts"]),
     }
     write_immutable_receipt(state_root, detector_receipt)
+
+
+def _covered_row_count(snapshot: Any) -> int:
+    """Rows accounted for in a snapshot: parsed, rejected, or policy-excluded."""
+    return (
+        len(snapshot.observations)
+        + len(snapshot.rejections)
+        + len(snapshot.exclusions)
+    )
 
 
 def _snapshot_summary(snapshot: Any) -> dict[str, Any]:

@@ -599,7 +599,35 @@ def test_bootstrap_requires_complete_coverage_before_any_write(
         now=NOW,
     )
     assert receipt["status"] == "source_drift"
+    assert receipt["stopReason"] == "incomplete_bootstrap_coverage"
     assert deps.ledger.events == {}
+
+
+def test_bootstrap_policy_exclusions_count_toward_coverage(
+    tmp_path: Path,
+) -> None:
+    rows = [observation(i) for i in range(12)]
+    deps = dependencies(
+        tmp_path,
+        FakeBrowser(rows, result_count=15, exclusions=3),
+        bootstrapped=False,
+    )
+    receipt = run_bootstrap(
+        config(tmp_path),
+        deps,
+        seed_top=10,
+        write=True,
+        now=NOW,
+    )
+    assert receipt["status"] == "complete"
+    assert receipt["stopReason"] != "incomplete_bootstrap_coverage"
+    assert receipt["sources"][0]["excludedPolicy"] == 3
+    assert receipt["counts"] == {
+        "created": 10,
+        "queued_existing": 0,
+        "baselined": 2,
+        "already_terminal": 0,
+    }
 
 
 def test_bootstrap_handoffs_top_ten_then_baselines_remainder(
