@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guarded Research-owned Crunchbase funding detector and CRMx handoff."""
+"""Guarded Research-owned Crunchbase funding detector → CRMx SQLite handoff."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable, ContextManager
 
@@ -39,7 +40,6 @@ from lib.crunchbase_saved_list import (  # noqa: E402
 from lib.funding_handoff import (  # noqa: E402
     build_handoff,
     invoke_crm_handoff,
-    resolve_funding_handoff_target,
     validate_result,
     write_handoff,
 )
@@ -51,6 +51,9 @@ from lib.funding_watcher_state import (  # noqa: E402
     new_york_slot,
     write_immutable_receipt,
 )
+
+
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 RETRYABLE_STATUSES = {"busy", "budget_exhausted", "crm_retryable", "browser_retryable"}
@@ -104,6 +107,10 @@ def run_check(
         receipt["slot"] = slot
         if enforce_schedule and slot is None:
             return _finish(state_root, receipt, "outside_schedule", "outside_schedule")
+        if enforce_schedule and now.astimezone(NEW_YORK).weekday() >= 5:
+            return _finish(
+                state_root, receipt, "outside_schedule", "weekend_not_scheduled"
+            )
         if slot and dependencies.ledger.slot_complete(slot):
             return _finish(
                 state_root, receipt, "already_checked_slot", "slot_already_complete"
@@ -230,7 +237,13 @@ def run_check(
                         "missing_terminal_high_water_anchor",
                     )
                 rows_to_diff = snapshot.observations
+            today_et = now.astimezone(NEW_YORK).date().isoformat()
             for row in rows_to_diff:
+                if row.funding_date != today_et:
+                    receipt["counts"]["skipped_not_today"] = (
+                        receipt["counts"].get("skipped_not_today", 0) + 1
+                    )
+                    continue
                 key = funding_event_key(row)
                 if dependencies.ledger.is_terminal(key):
                     receipt["counts"]["already_terminal"] += 1
@@ -587,6 +600,7 @@ def _base_receipt(
             "already_terminal": 0,
             "rejected_parse": 0,
             "would_handoff": 0,
+            "skipped_not_today": 0,
         },
     }
 
@@ -755,30 +769,16 @@ def _notification(items: list[str]) -> None:
         return
 
 
-def _production_dependencies(
-    config: dict[str, Any],
-    *,
-    legacy_handoff: bool = False,
-) -> WatcherDependencies:
+def _production_dependencies(config: dict[str, Any]) -> WatcherDependencies:
     state_root = Path(config["stateDirectory"]).expanduser()
     ledger = FundingWatcherLedger(state_root / "ledger.json")
-    target = resolve_funding_handoff_target(
-        legacy=legacy_handoff,
-        configured=str(config.get("handoffTarget") or "") or None,
-    )
 
     def invoke(request: dict[str, Any], write: bool) -> dict[str, Any]:
         out = state_root / "handoffs"
         request_path = (out / f"{request['runId']}.request.json").resolve()
         result_path = (out / f"{request['runId']}.result.json").resolve()
         write_handoff(request_path, request)
-        return invoke_crm_handoff(
-            request_path,
-            result_path,
-            write=write,
-            target=target,
-            legacy=legacy_handoff,
-        )
+        return invoke_crm_handoff(request_path, result_path, write=write)
 
     return WatcherDependencies(
         browser=CrunchbaseSavedListBrowser(),
@@ -827,14 +827,6 @@ def main(argv: list[str] | None = None) -> int:
         mode.add_argument("--dry-run", action="store_true")
         mode.add_argument("--write", action="store_true")
         command.add_argument("--yes", action="store_true")
-        command.add_argument(
-            "--handoff-legacy-crm-core",
-            action="store_true",
-            help=(
-                "explicit legacy shim: invoke crm-core crm_funding_handoff.py "
-                "instead of CRMx ingest_csv"
-            ),
-        )
         if name == "check":
             command.add_argument("--enforce-schedule", action="store_true")
         else:
@@ -865,12 +857,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(receipt, indent=2, sort_keys=True))
             return 0
-        deps = _production_dependencies(
-            config,
-            legacy_handoff=bool(
-                getattr(args, "handoff_legacy_crm_core", False)
-            ),
-        )
+        deps = _production_dependencies(config)
         now = datetime.now(timezone.utc)
         if args.command == "check":
             receipt = run_check(

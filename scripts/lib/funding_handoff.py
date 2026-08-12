@@ -1,12 +1,11 @@
-"""Versioned JSON bridge from Research funding discovery to CRMx (or legacy Core).
+"""Versioned bridge from Research discovery to CRMx SQLite funding ingest.
 
-Default path: convert typed funding events → CRMx CSV + evidence sidecar →
-`norman.tools.ingest_csv --evidence`. Legacy `crm_funding_handoff.py` remains
-only behind an explicit opt-in (`legacy_crm_core` / `--handoff-legacy-crm-core`).
+Primary path (ADR 0018): observations → Crunchbase-shaped CSV →
+``uv run python -m norman.tools.funding_ingest`` → ``reconcile_sweep --apply``
+→ narrow ``score_batch`` for the run cohort. Notion is projection only.
 
-CRMx has no verified typed funding-handoff CLI. Successful ingest_csv is
-adapted into the ledger-compatible result shape; Research does not invent
-Notion writes or Fit scores.
+Legacy crm-core Notion handoff remains importable for tests but is not used
+by the live watcher production dependencies.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,16 +23,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
-from lib.candidates import CRMX_CSV_COLUMNS
 from lib.crunchbase_saved_list import FundingObservation
 from lib.funding_watcher_state import funding_event_key
 
 
 REQUEST_SCHEMA_VERSION = "norman.research.funding_handoff.v1"
-RESULT_SCHEMA_VERSION = "norman.crm_core.funding_handoff_result.v1"
-EVIDENCE_SCHEMA_VERSION = "norman.research.crmx_evidence.v1"
-HANDOFF_TARGETS = frozenset({"crmx", "legacy_crm_core"})
+RESULT_SCHEMA_VERSION = "norman.crmx.funding_handoff_result.v1"
+LEGACY_RESULT_SCHEMA_VERSION = "norman.crm_core.funding_handoff_result.v1"
 TERMINAL_STATES = {
     "created",
     "queued_existing",
@@ -44,6 +43,34 @@ ROOT = Path(__file__).resolve().parents[2]
 LINKEDIN_COMPANY_PATH = re.compile(
     r"/company/(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)(?:/about)?/?"
 )
+NEW_YORK = ZoneInfo("America/New_York")
+
+# Exact CRMx EXPECTED_COLUMNS order (no extras — header drift fails closed).
+CRMX_CSV_COLUMNS = [
+    "Organization Name",
+    "Organization Name URL",
+    "Headquarters Location",
+    "Founded Date",
+    "Founded Date Precision",
+    "Industries",
+    "Last Funding Date",
+    "Last Funding Amount",
+    "Last Funding Amount Currency",
+    "Last Funding Amount (in USD)",
+    "Description",
+    "Website",
+    "X (Twitter)",
+    "LinkedIn",
+    "Founders",
+    "Number of Funding Rounds",
+    "Last Funding Type",
+    "Total Funding Amount",
+    "Total Funding Amount Currency",
+    "Total Funding Amount (in USD)",
+    "Top 5 Investors",
+    "Lead Investors",
+    "Full Description",
+]
 
 
 def _canonical_linkedin_company_url(value: str) -> str:
@@ -101,10 +128,12 @@ def build_handoff(
                 "website": observation.website,
                 "linkedin": _canonical_linkedin_company_url(observation.linkedin),
                 "founders": list(observation.founders),
+                "investors": list(observation.investors),
                 "description": observation.description,
                 "founded": observation.founded,
                 "headquarters": observation.headquarters,
                 "industries": list(observation.industries),
+                "numberOfFundingRounds": observation.number_of_funding_rounds,
                 "funding": {
                     "date": observation.funding_date,
                     "type": observation.funding_type,
@@ -112,6 +141,8 @@ def build_handoff(
                     "amountMinor": observation.funding_amount_minor,
                     "currency": observation.funding_currency,
                     "totalRaw": observation.total_funding_raw,
+                    "totalAmountMinor": observation.total_funding_amount_minor,
+                    "totalCurrency": observation.total_funding_currency,
                 },
             }
         )
@@ -152,7 +183,7 @@ def write_handoff(path: Path, payload: dict[str, Any]) -> None:
 def validate_result(
     payload: Any, *, request: dict[str, Any]
 ) -> dict[str, Any]:
-    """Validate a handoff result as an immutable answer to one exact request."""
+    """Validate a CRMx (or legacy Core) result as an immutable answer."""
     if not isinstance(payload, dict) or set(payload) != {
         "schemaVersion",
         "runId",
@@ -162,7 +193,10 @@ def validate_result(
         "events",
     }:
         raise ValueError("CRM result has an invalid shape")
-    if payload["schemaVersion"] != RESULT_SCHEMA_VERSION:
+    if payload["schemaVersion"] not in {
+        RESULT_SCHEMA_VERSION,
+        LEGACY_RESULT_SCHEMA_VERSION,
+    }:
         raise ValueError("CRM result schemaVersion is invalid")
     if payload["runId"] != request.get("runId"):
         raise ValueError("CRM result runId does not match request")
@@ -216,274 +250,82 @@ def validate_result(
     return payload
 
 
-def resolve_funding_handoff_target(
-    *,
-    legacy: bool = False,
-    configured: str | None = None,
-) -> str:
-    """Return crmx (default) or legacy_crm_core. Unknown targets fail closed."""
-    if legacy:
-        return "legacy_crm_core"
-    env = (os.environ.get("NORMAN_FUNDING_HANDOFF_TARGET") or "").strip()
-    raw = (configured or env or "").strip()
-    if not raw:
-        watcher = ROOT / "config" / "funding-watcher.json"
-        if watcher.is_file():
-            try:
-                payload = json.loads(watcher.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, dict):
-                raw = str(payload.get("handoffTarget") or "").strip()
-    if not raw:
-        raw = "crmx"
-    if raw not in HANDOFF_TARGETS:
-        raise RuntimeError(
-            f"unknown funding handoff target {raw!r}; expected one of "
-            f"{sorted(HANDOFF_TARGETS)}. Fail closed — refusing to invent a "
-            "Notion writer."
-        )
-    return raw
-
-
-def write_crmx_funding_artifacts(
-    request: dict[str, Any],
-    *,
-    csv_path: Path,
-    evidence_path: Path,
-) -> tuple[Path, Path]:
-    """Map typed funding events into CRMx ingest_csv CSV + evidence sidecar.
-
-    Unknown numeric amounts stay blank (never 0). Non-USD amounts stay blank in
-    the CSV money columns — Research will not invent FX conversion. Richer
-    funding facts travel in the evidence sidecar.
-    """
-    events = request.get("events")
-    if not isinstance(events, list) or not events:
-        raise ValueError("request events must be a non-empty list")
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, str]] = []
-    evidence_candidates: list[dict[str, Any]] = []
-    for event in events:
-        if not isinstance(event, dict):
-            raise ValueError("request event must be an object")
-        funding = event.get("funding") if isinstance(event.get("funding"), dict) else {}
-        amount_usd = _usd_dollars_from_minor(
-            funding.get("amountMinor"),
-            str(funding.get("currency") or ""),
-        )
-        # totalRaw is preserved in evidence; CSV total stays blank unless we
-        # also have structured minor units on the request (we do not today).
-        total_usd = None
-        founders = event.get("founders") if isinstance(event.get("founders"), list) else []
-        industries = (
-            event.get("industries") if isinstance(event.get("industries"), list) else []
-        )
-        rows.append(
-            {
-                "Organization Name": str(event.get("company") or ""),
-                "Organization Name URL": str(event.get("crunchbaseUrl") or ""),
-                "Headquarters Location": str(event.get("headquarters") or ""),
-                "Founded Date": str(event.get("founded") or ""),
-                "Industries": ", ".join(str(item) for item in industries if item),
-                "Last Funding Date": str(funding.get("date") or ""),
-                "Last Funding Amount (in USD)": (
-                    "" if amount_usd is None else f"{amount_usd:.0f}"
-                ),
-                "Description": str(event.get("description") or ""),
-                "Website": str(event.get("website") or ""),
-                "X (Twitter)": "",
-                "LinkedIn": str(event.get("linkedin") or ""),
-                "Founders": ", ".join(str(item) for item in founders if item),
-                "Number of Funding Rounds": "",
-                "Last Funding Type": str(funding.get("type") or ""),
-                "Total Funding Amount (in USD)": (
-                    "" if total_usd is None else f"{total_usd:.0f}"
-                ),
-                "Top 5 Investors": "",
-            }
-        )
-        source_urls = [
-            url
-            for url in (
-                str(event.get("sourceUrl") or ""),
-                str(event.get("crunchbaseUrl") or ""),
-            )
-            if url
-        ]
-        funding_type = str(funding.get("type") or "").strip()
-        evidence_candidates.append(
-            {
-                "company": event.get("company") or "",
-                "website": event.get("website") or "",
-                "linkedin": event.get("linkedin") or "",
-                "crunchbase": event.get("crunchbaseUrl") or "",
-                "one_liner": event.get("description") or "",
-                "founders": ", ".join(str(item) for item in founders if item),
-                "founded": event.get("founded") or "",
-                "hq": event.get("headquarters") or "",
-                "industries": ", ".join(str(item) for item in industries if item),
-                "last_funding_date": funding.get("date") or "",
-                "last_funding_usd": amount_usd,
-                "last_funding_type": funding_type,
-                "total_funding_usd": None,
-                "num_rounds": None,
-                "investors": "",
-                "nyc_evidence": "",
-                "nyc_angle": "none",
-                "fit_hint": "none",
-                "keyword_hits": [funding_type] if funding_type else [],
-                "signal_notes": (
-                    f"Crunchbase funding watcher event; "
-                    f"amountRaw={funding.get('amountRaw') or ''}; "
-                    f"currency={funding.get('currency') or ''}; "
-                    f"totalRaw={funding.get('totalRaw') or ''}"
-                ),
-                "source_urls": source_urls,
-                "mode": "funding",
-                "lane": "crunchbase_funding_watcher",
-                "event_key": event.get("eventKey") or "",
-                "funding_amount_minor": funding.get("amountMinor"),
-                "funding_currency": funding.get("currency") or "",
-                "qualify_reason": "strict_funding_watcher",
-            }
-        )
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+def write_crmx_csv(path: Path, events: Sequence[dict[str, Any]]) -> None:
+    """Write a Crunchbase-shaped CSV CRMx funding_ingest accepts."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CRMX_CSV_COLUMNS)
         writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    evidence_payload = {
-        "schemaVersion": EVIDENCE_SCHEMA_VERSION,
-        "generated_at": str(request.get("generatedAt") or ""),
-        "run_id": request.get("runId"),
-        "count": len(evidence_candidates),
-        "candidates": evidence_candidates,
-        "note": (
-            "Funding-watcher evidence for CRMx ingest_csv. Not a Fit score. "
-            "CRMx owns SoR writes; Research never writes Notion as SoR. "
-            "Adapter path: typed funding_handoff.v1 → CSV + evidence because "
-            "no public CRMx typed funding CLI was verified."
-        ),
-    }
-    evidence_path.write_text(
-        json.dumps(evidence_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return csv_path, evidence_path
+        for event in events:
+            writer.writerow(_event_to_csv_row(event))
 
 
-def synthesize_crmx_handoff_result(
-    request: dict[str, Any],
-    *,
-    mode: str,
-) -> dict[str, Any]:
-    """Ledger-compatible result after CRMx ingest_csv (or dry-run preview).
-
-    ingest_csv does not return per-event terminal states. On accepted write,
-    every event is recorded as `created` with a synthetic `crmx:ingest:…`
-    pageId so the Research ledger can close. Follow-up: a typed CRMx funding
-    CLI should replace this adapter synthesis.
-    """
-    if mode not in {"dry_run", "write"}:
-        raise ValueError("mode must be dry_run or write")
-    events = request.get("events")
-    if not isinstance(events, list):
-        raise ValueError("request events must be a list")
-    result_events: list[dict[str, Any]] = []
-    for event in events:
-        key = str(event.get("eventKey") or "")
-        item: dict[str, Any] = {
-            "eventKey": key,
-            "state": "created",
-            "reason": (
-                "crmx_ingest_csv_accepted"
-                if mode == "write"
-                else "crmx_ingest_csv_preview"
-            ),
-        }
-        if mode == "write":
-            item["pageId"] = f"crmx:ingest:{key}"
-        result_events.append(item)
+def _event_to_csv_row(event: dict[str, Any]) -> dict[str, str]:
+    funding = event.get("funding") or {}
+    if not isinstance(funding, dict):
+        funding = {}
+    founded_date, founded_precision = _founded_fields(str(event.get("founded") or ""))
+    amount_minor = funding.get("amountMinor")
+    currency = str(funding.get("currency") or "")
+    total_minor = funding.get("totalAmountMinor")
+    total_currency = str(funding.get("totalCurrency") or "")
+    rounds = event.get("numberOfFundingRounds")
+    investors = event.get("investors") if isinstance(event.get("investors"), list) else []
+    founders = event.get("founders") if isinstance(event.get("founders"), list) else []
+    industries = event.get("industries") if isinstance(event.get("industries"), list) else []
     return {
-        "schemaVersion": RESULT_SCHEMA_VERSION,
-        "runId": request.get("runId"),
-        "requestDigest": hashlib.sha256(
-            _canonical_request_bytes(request)
-        ).hexdigest(),
-        "mode": mode,
-        "complete": True,
-        "events": result_events,
+        "Organization Name": str(event.get("company") or ""),
+        "Organization Name URL": str(event.get("crunchbaseUrl") or ""),
+        "Headquarters Location": str(event.get("headquarters") or ""),
+        "Founded Date": founded_date,
+        "Founded Date Precision": founded_precision,
+        "Industries": ", ".join(str(item) for item in industries if item),
+        "Last Funding Date": str(funding.get("date") or ""),
+        "Last Funding Amount": str(funding.get("amountRaw") or ""),
+        "Last Funding Amount Currency": currency,
+        "Last Funding Amount (in USD)": _usd_dollars(amount_minor, currency),
+        "Description": str(event.get("description") or ""),
+        "Website": str(event.get("website") or ""),
+        "X (Twitter)": "",
+        "LinkedIn": str(event.get("linkedin") or ""),
+        "Founders": ", ".join(str(item) for item in founders if item),
+        "Number of Funding Rounds": (
+            str(rounds) if isinstance(rounds, int) and rounds > 0 else ""
+        ),
+        "Last Funding Type": str(funding.get("type") or ""),
+        "Total Funding Amount": str(funding.get("totalRaw") or ""),
+        "Total Funding Amount Currency": total_currency,
+        "Total Funding Amount (in USD)": _usd_dollars(total_minor, total_currency),
+        "Top 5 Investors": ", ".join(str(item) for item in investors if item),
+        "Lead Investors": "",
+        "Full Description": "",
     }
 
 
-def invoke_crmx_funding_handoff(
-    request_path: Path,
-    result_path: Path,
-    *,
-    write: bool,
-    timeout_seconds: int = 900,
-) -> dict[str, Any]:
-    """Promote funding events through CRMx ingest_csv + evidence (fail-closed)."""
-    if not request_path.is_absolute() or not result_path.is_absolute():
-        raise ValueError("handoff paths must be absolute")
-    request = _load_json(request_path)
-    out_dir = request_path.parent
-    run_id = str(request.get("runId") or "unknown")
-    csv_path = (out_dir / f"{run_id}.crmx.csv").resolve()
-    evidence_path = (out_dir / f"{run_id}.evidence.json").resolve()
-    write_crmx_funding_artifacts(
-        request, csv_path=csv_path, evidence_path=evidence_path
-    )
-
-    try:
-        from lib.sinks import SinkError, promote_via_crmx
-    except ImportError as exc:  # pragma: no cover - package layout invariant
-        raise RuntimeError("CRMx promote helper unavailable") from exc
-
-    if not write:
-        # Fail closed on missing CRMx path/DB/module/evidence by reusing the
-        # promote preflight; ingest_csv has no verified dry-run, so the
-        # expected SinkError means config is sound and we synthesize a preview.
-        try:
-            promote_via_crmx(
-                csv_path,
-                evidence_path=evidence_path,
-                dry_run=True,
-            )
-        except SinkError as exc:
-            if "dry-run" not in str(exc).casefold():
-                raise RuntimeError(f"CRM handoff retryable: {exc}") from exc
-        else:  # pragma: no cover - would mean CRMx gained a dry-run flag
-            raise RuntimeError(
-                "CRMx ingest_csv unexpectedly accepted dry_run; refusing to "
-                "guess whether a write occurred"
-            )
-        result = synthesize_crmx_handoff_result(request, mode="dry_run")
-        _atomic_write_json(result_path, result)
-        return validate_result(result, request=request)
-
-    try:
-        promote_via_crmx(
-            csv_path,
-            evidence_path=evidence_path,
-            dry_run=False,
-        )
-    except SinkError as exc:
-        raise RuntimeError(f"CRM handoff retryable: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("CRM handoff retryable timeout") from exc
-
-    result = synthesize_crmx_handoff_result(request, mode="write")
-    _atomic_write_json(result_path, result)
-    validated = validate_result(_load_json(result_path), request=request)
-    if validated["mode"] != "write":
-        raise ValueError("CRM result mode does not match invocation")
-    return validated
+def _founded_fields(founded: str) -> tuple[str, str]:
+    text = " ".join(founded.split())
+    if not text:
+        return "", ""
+    if re.fullmatch(r"\d{4}", text):
+        return f"{text}-01-01", "year"
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        return f"{text}-01", "month"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text, "day"
+    # Browser sometimes yields "Jan 2024" etc. — leave Unknown rather than guess.
+    return "", ""
 
 
-def invoke_legacy_crm_handoff(
+def _usd_dollars(minor: Any, currency: str) -> str:
+    if currency != "USD" or not isinstance(minor, int) or isinstance(minor, bool):
+        return ""
+    dollars = minor // 100
+    if dollars <= 0:
+        return ""
+    return str(dollars)
+
+
+def invoke_crm_handoff(
     request_path: Path,
     result_path: Path,
     *,
@@ -491,7 +333,139 @@ def invoke_legacy_crm_handoff(
     timeout_seconds: int = 900,
     core_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Explicit legacy shim: invoke crm-core's crm_funding_handoff.py."""
+    """Invoke CRMx funding ingest (+ reconcile + cohort score) and validate."""
+    del core_path  # legacy kwarg retained for call-site compatibility
+    if not request_path.is_absolute() or not result_path.is_absolute():
+        raise ValueError("handoff paths must be absolute")
+    request = _load_json(request_path)
+    crmx_root, db_path, added_from_prefix = _configured_crmx()
+    csv_path = request_path.with_suffix(".crmx.csv")
+    write_crmx_csv(csv_path, request["events"])
+    generated = _aware_datetime(str(request["generatedAt"]), "generatedAt")
+    local_day = generated.astimezone(NEW_YORK).date().isoformat()
+    added_from = f"{added_from_prefix}:{local_day}"
+
+    if not write:
+        result = _synthesize_result(
+            request,
+            mode="dry_run",
+            events=[
+                {
+                    "eventKey": event["eventKey"],
+                    "state": "created",
+                    "reason": "crmx_dry_run_preview",
+                }
+                for event in request["events"]
+            ],
+        )
+        _write_json(result_path, result)
+        return validate_result(result, request=request)
+
+    pre_existing = _lookup_entities(db_path, [e.get("crunchbaseUrl") for e in request["events"]])
+    _run_uv(
+        crmx_root,
+        [
+            "python",
+            "-m",
+            "norman.tools.funding_ingest",
+            str(csv_path),
+            str(db_path),
+            "--added-from",
+            added_from,
+        ],
+        timeout_seconds=timeout_seconds,
+        label="funding_ingest",
+    )
+    _run_uv(
+        crmx_root,
+        [
+            "python",
+            "-m",
+            "norman.tools.reconcile_sweep",
+            str(db_path),
+            "--apply",
+        ],
+        timeout_seconds=timeout_seconds,
+        label="reconcile_sweep",
+    )
+    # JD wants auto-score for newly ingested cohort. score_batch --apply is
+    # attended-only under A19; funding-watcher is the explicit exception for
+    # this cohort-scoped path (narrow --added-from date tag + --all).
+    score = _run_uv(
+        crmx_root,
+        [
+            "python",
+            "-m",
+            "norman.tools.score_batch",
+            str(db_path),
+            "--added-from",
+            added_from,
+            "--all",
+            "--apply",
+        ],
+        timeout_seconds=timeout_seconds,
+        label="score_batch",
+        allow_failure=True,
+    )
+    post_existing = _lookup_entities(
+        db_path, [e.get("crunchbaseUrl") for e in request["events"]]
+    )
+    result_events: list[dict[str, Any]] = []
+    for event in request["events"]:
+        url = str(event.get("crunchbaseUrl") or "")
+        entity_id = post_existing.get(url.casefold())
+        was = pre_existing.get(url.casefold())
+        if entity_id and was:
+            result_events.append(
+                {
+                    "eventKey": event["eventKey"],
+                    "state": "queued_existing",
+                    "reason": "crunchbase_url",
+                    "pageId": entity_id,
+                }
+            )
+        elif entity_id:
+            result_events.append(
+                {
+                    "eventKey": event["eventKey"],
+                    "state": "created",
+                    "reason": "crmx_sqlite_ingest",
+                    "pageId": entity_id,
+                }
+            )
+        else:
+            result_events.append(
+                {
+                    "eventKey": event["eventKey"],
+                    "state": "rejected_identity",
+                    "reason": "crmx_ingest_no_entity",
+                }
+            )
+    result = _synthesize_result(request, mode="write", events=result_events)
+    result_meta = {
+        "addedFrom": added_from,
+        "csvPath": str(csv_path),
+        "scoreBatch": {
+            "ok": score.returncode == 0,
+            "stdout": (score.stdout or "")[-2000:],
+            "stderr": (score.stderr or "")[-1000:],
+        },
+    }
+    _write_json(result_path, result)
+    meta_path = result_path.with_suffix(".crmx-meta.json")
+    _write_json(meta_path, result_meta)
+    return validate_result(result, request=request)
+
+
+def invoke_legacy_crm_core_handoff(
+    request_path: Path,
+    result_path: Path,
+    *,
+    write: bool,
+    timeout_seconds: int = 900,
+    core_path: Path | None = None,
+) -> dict[str, Any]:
+    """Legacy Notion-era Core CLI (tests / emergency only)."""
     if not request_path.is_absolute() or not result_path.is_absolute():
         raise ValueError("handoff paths must be absolute")
     request = _load_json(request_path)
@@ -534,40 +508,55 @@ def invoke_legacy_crm_handoff(
     return result
 
 
-def invoke_crm_handoff(
-    request_path: Path,
-    result_path: Path,
+def _synthesize_result(
+    request: dict[str, Any],
     *,
-    write: bool,
-    timeout_seconds: int = 900,
-    core_path: Path | None = None,
-    target: str | None = None,
-    legacy: bool = False,
+    mode: str,
+    events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Dispatch funding handoff to CRMx (default) or explicit legacy crm-core.
+    digest = hashlib.sha256(_canonical_request_bytes(request)).hexdigest()
+    return {
+        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "runId": request["runId"],
+        "requestDigest": digest,
+        "mode": mode,
+        "complete": True,
+        "events": events,
+    }
 
-    Passing `core_path` implies the legacy target (compat with older call sites
-    that invoked the Core CLI through this name). Production should prefer
-    `legacy=True` / `--handoff-legacy-crm-core` instead.
-    """
-    use_legacy = legacy or core_path is not None
-    resolved = resolve_funding_handoff_target(
-        legacy=use_legacy, configured=None if use_legacy else target
-    )
-    if resolved == "legacy_crm_core":
-        return invoke_legacy_crm_handoff(
-            request_path,
-            result_path,
-            write=write,
-            timeout_seconds=timeout_seconds,
-            core_path=core_path,
-        )
-    return invoke_crmx_funding_handoff(
-        request_path,
-        result_path,
-        write=write,
-        timeout_seconds=timeout_seconds,
-    )
+
+def _configured_crmx() -> tuple[Path, Path, str]:
+    override_root = os.environ.get("NORMAN_CRMX_PATH")
+    override_db = os.environ.get("NORMAN_CRMX_DB")
+    config = _load_json(ROOT / "config" / "research.json")
+    block = config.get("crmx") or {}
+    if override_root:
+        root = Path(override_root).expanduser()
+    else:
+        value = block.get("path")
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError("crmx.path is not configured")
+        root = Path(value).expanduser()
+        if not root.is_absolute():
+            root = (ROOT / root).resolve()
+    if not root.is_absolute():
+        raise RuntimeError("NORMAN_CRMX_PATH / crmx.path must be absolute")
+    root = root.resolve()
+    if override_db:
+        db = Path(override_db).expanduser().resolve()
+    else:
+        rel = block.get("db") or "data/norman.db"
+        db = Path(rel).expanduser()
+        if not db.is_absolute():
+            db = (root / db).resolve()
+    prefix = block.get("addedFromPrefix") or "crunchbase-watcher"
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise RuntimeError("crmx.addedFromPrefix is invalid")
+    if not root.is_dir():
+        raise RuntimeError(f"CRMx checkout missing: {root}")
+    if not db.is_file():
+        raise RuntimeError(f"CRMx SQLite missing: {db}")
+    return root, db, prefix.strip()
 
 
 def _configured_core_path() -> Path:
@@ -584,18 +573,56 @@ def _configured_core_path() -> Path:
     return ROOT / value
 
 
-def _usd_dollars_from_minor(minor: Any, currency: str) -> float | None:
-    """Convert minor units to USD dollars. Non-USD / missing → None (blank)."""
-    if minor is None or isinstance(minor, bool):
-        return None
-    if not isinstance(minor, int):
-        return None
-    if (currency or "").strip().upper() != "USD":
-        return None
-    # Unknown ≠ 0: a zero minor amount is still a claim of $0 — keep it as 0.0
-    # only when the source asserted USD minor units. Parser rejects missing
-    # amounts before handoff.
-    return minor / 100.0
+def _run_uv(
+    crmx_root: Path,
+    args: list[str],
+    *,
+    timeout_seconds: int,
+    label: str,
+    allow_failure: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command = ["uv", "run", *args]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(crmx_root),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("uv is required for CRMx funding handoff") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"CRMx {label} retryable timeout") from exc
+    if completed.returncode and not allow_failure:
+        detail = (completed.stderr or completed.stdout or "")[:500]
+        raise RuntimeError(f"CRMx {label} exit {completed.returncode}: {detail}")
+    return completed
+
+
+def _lookup_entities(db_path: Path, urls: Sequence[Any]) -> dict[str, str]:
+    wanted = {
+        str(url).strip().casefold()
+        for url in urls
+        if isinstance(url, str) and url.strip()
+    }
+    if not wanted:
+        return {}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT entity_id, crunchbase_url FROM companies "
+            "WHERE crunchbase_url IS NOT NULL AND trim(crunchbase_url) != ''"
+        ).fetchall()
+    finally:
+        conn.close()
+    found: dict[str, str] = {}
+    for entity_id, url in rows:
+        key = str(url).strip().casefold()
+        if key in wanted:
+            found[key] = str(entity_id)
+    return found
 
 
 def _canonical_request_bytes(payload: dict[str, Any]) -> bytes:
@@ -614,27 +641,12 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
     )
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 def _aware_datetime(value: str, label: str) -> datetime:

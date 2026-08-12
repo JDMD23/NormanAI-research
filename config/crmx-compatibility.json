@@ -5,23 +5,31 @@
   "verifiedPublicIntake": {
     "module": "norman.tools.ingest_csv",
     "invocation": "uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label> --evidence <path.json>",
-    "evidence": "CRMx fail-closed evidence ingest (schema norman.research.crmx_evidence.v1). Research promote always passes --evidence; missing sidecar fails closed. See NormanAI-CRMx docs/research-evidence-handoff.md.",
-    "csvContract": "Crunchbase-export column names (Organization Name, Website, LinkedIn, …). Research remaps its internal candidate fields into this shape before promote.",
-    "richerIntake": "Research always writes a versioned evidence JSON sidecar (nyc_evidence, source_urls, keyword_hits, signal_notes) beside the CSV and passes it to ingest_csv via --evidence. Research will not invent Notion writes or Fit scores to preserve evidence."
+    "evidence": "CRMx fail-closed evidence ingest (schema norman.research.crmx_evidence.v1). Research promote always passes --evidence; missing sidecar fails closed.",
+    "csvContract": "Crunchbase-export column names (Organization Name, Website, LinkedIn, …).",
+    "richerIntake": "Ordinary promote writes a versioned evidence JSON sidecar and passes it via --evidence."
   },
   "evidenceSidecarSchemaVersion": "norman.research.crmx_evidence.v1",
   "fundingHandoff": {
-    "status": "adapted_via_ingest_csv",
+    "status": "crmx_sqlite_sor",
     "requestSchema": "norman.research.funding_handoff.v1",
-    "adapter": "Research maps typed funding events → CRMx CSV + norman.research.crmx_evidence.v1 sidecar, then calls norman.tools.ingest_csv --evidence (same public surface as ordinary promote).",
-    "typedCli": "none verified — CRMx returned 404 to this agent's token and no public funding-handoff CLI was found. Do not invent Notion/Fit writers from Research.",
-    "resultSynthesis": "On successful ingest_csv, Research synthesizes ledger-compatible norman.crm_core.funding_handoff_result.v1 with state=created and pageId=crmx:ingest:<eventKey>. Follow-up for CRMx: publish a typed funding CLI that returns durable per-event terminal states (created/queued_existing/duplicate_event/…) so Research can stop synthesizing.",
-    "legacyFlag": "--handoff-legacy-crm-core",
+    "resultSchema": "norman.crmx.funding_handoff_result.v1",
+    "addedFromPrefix": "crunchbase-watcher",
+    "ingest": "norman.tools.funding_ingest <csv> <db> --added-from crunchbase-watcher:<YYYY-MM-DD>",
+    "postIngest": [
+      "norman.tools.reconcile_sweep <db> --apply",
+      "norman.tools.score_batch <db> --added-from crunchbase-watcher:<YYYY-MM-DD> --all --apply"
+    ],
+    "csvContract": "Full Crunchbase export headers (founded, HQ, industries, investors, funding fields, …). Unknown ≠ 0.",
+    "csvDropFallback": "CRMx CSV drop folder remains offline/manual fallback only — not the primary watcher path.",
+    "notion": "Projection via reconcile_sweep only. Research never dual-writes MACHINE props.",
+    "schedule": "Weekdays ET 09:00 / 12:00 / 15:00 / 18:00; funded-today filter (America/New_York)",
+    "source": "https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993",
     "env": ["NORMAN_CRMX_PATH", "NORMAN_CRMX_DB"]
   },
   "legacyShim": {
     "flag": "--promote-legacy-crm-core",
-    "fundingFlag": "--handoff-legacy-crm-core",
+    "fundingFlag": "invoke_legacy_crm_core_handoff (tests/emergency)",
     "configTarget": "legacy_crm_core",
     "cli": "scripts/crm_intake.py",
     "fundingCli": "scripts/crm_funding_handoff.py"

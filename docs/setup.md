@@ -63,12 +63,13 @@ bug from becoming a bill.
 
 The strict watcher is pinned to one source; do not substitute a generic list:
 
-`https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993`
+`https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993`
 
-Open it in JD's Chrome and confirm it visibly says `Companies`, `NEW AT TOP`,
-funding after `2026-07-01`, and minimum amount `$5M`. The watcher fails closed
-on login walls, CAPTCHA, changed filters, incomplete pages, or result-count
-drift.
+Open it in JD's Chrome and confirm it visibly says `Companies`, `NEW AT TOP`
+(last funding date newest first), funding after `2026-08-01`, and minimum
+amount `$5M`. Scheduled checks hand off only companies funded **today**
+(America/New_York). The watcher fails closed on login walls, CAPTCHA, changed
+filters, incomplete pages, or result-count drift.
 
 Before the first supervised run:
 

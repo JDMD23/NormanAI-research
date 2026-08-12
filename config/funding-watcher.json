@@ -2,7 +2,7 @@
   "schemaVersion": "norman.research.crunchbase_funding_watcher.v1",
   "enabled": true,
   "timeZone": "America/New_York",
-  "scheduleHours": [6, 10, 13, 16, 19],
+  "scheduleHours": [9, 12, 15, 18],
   "scheduledMaxPagesPerSource": 3,
   "bootstrapMaxPagesPerSource": 6,
   "bootstrapSeedTop": 10,
@@ -11,11 +11,11 @@
   "stateDirectory": "~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher",
   "legacyStateDirectory": "~/Library/Application Support/NormanAI/CRM Core/crunchbase-funding-watcher",
   "handoffTarget": "crmx",
-  "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
+  "crmResultSchemaVersion": "norman.crmx.funding_handoff_result.v1",
   "sources": [
     {
       "name": "Main Funding - August 2026",
-      "url": "https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993",
+      "url": "https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993",
       "expectedResultType": "Companies",
       "expectedSort": "NEW AT TOP",
       "expectedFundingAfter": "2026-08-01",

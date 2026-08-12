@@ -27,6 +27,11 @@ def test_live_watcher_config_tracks_current_funding_month() -> None:
 
     assert source.name == "Main Funding - August 2026"
     assert source.expected_funding_after == "2026-08-01"
+    assert "main-funding-august-2026" in source.url
+    assert config["scheduleHours"] == [9, 12, 15, 18]
+    assert config["crmResultSchemaVersion"] == (
+        "norman.crmx.funding_handoff_result.v1"
+    )
 
 
 def test_readme_describes_the_v4_shared_capacity_contract() -> None:

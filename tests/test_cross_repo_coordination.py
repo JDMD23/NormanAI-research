@@ -423,6 +423,10 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
     fixture_source = replace(
         config["sourceDefinitions"][0],
         name="Main Funding - July 2026",
+        url=(
+            "https://www.crunchbase.com/discover/saved/"
+            "main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993"
+        ),
         expected_funding_after="2026-07-01",
     )
     snapshot = parse_saved_list_snapshot(
