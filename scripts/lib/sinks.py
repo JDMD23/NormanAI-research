@@ -81,9 +81,9 @@ def write_crmx_intake_csv(
 def write_evidence(candidates: list[Candidate], out_path: Path | None = None) -> Path:
     """Versioned sidecar JSON holding why each company was picked.
 
-    CRMx's public intake today is CSV-only; nyc_evidence / source_urls /
-    keyword_hits would otherwise be dropped. The sidecar is the handoff
-    contract for that evidence until CRMx grows a richer ingest lane.
+    Schema `norman.research.crmx_evidence.v1` carries nyc_evidence /
+    source_urls / keyword_hits that the Crunchbase-shaped CSV cannot hold.
+    Promote always passes this path to CRMx via `ingest_csv --evidence`.
     """
     evidence_cfg = (research_config().get("sink") or {}).get("evidence") or {}
     schema = evidence_cfg.get("schemaVersion") or "norman.research.crmx_evidence.v1"
@@ -162,15 +162,16 @@ def promote_via_crmx(
     evidence_path: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Hand the CSV to CRMx's public ingest CLI.
+    """Hand the CSV + evidence sidecar to CRMx's public ingest CLI.
 
-    Documented public surface (NormansBrain batch-runbook, CRMx tip b805e90):
+    Documented public surface (CRMx fail-closed evidence ingest):
 
-        uv run python -m norman.tools.ingest_csv <csv> <db> --added-from <label>
+        uv run python -m norman.tools.ingest_csv <csv> <db> \\
+            --added-from <label> --evidence <path.json>
 
-    Fail closed when the CRMx checkout, ingest module, or DB path is missing.
-    Research does not fall back to Notion writes. The evidence sidecar path is
-    recorded in the receipt; CRMx CSV ingest does not consume it today.
+    Fail closed when the CRMx checkout, ingest module, DB path, or evidence
+    sidecar is missing. Research does not fall back to Notion writes and does
+    not invent Fit scores.
     """
     cfg = research_config().get("crmx") or {}
     root = crmx_path()
@@ -204,6 +205,19 @@ def promote_via_crmx(
             "omit promote and inspect the CSV + evidence sidecar."
         )
 
+    if evidence_path is None:
+        raise SinkError(
+            "CRMx promote requires an evidence sidecar path "
+            "(schema norman.research.crmx_evidence.v1). Fail closed — refusing "
+            "to call ingest_csv without --evidence."
+        )
+    evidence = Path(evidence_path)
+    if not evidence.is_file():
+        raise SinkError(
+            f"evidence sidecar missing at {evidence}. CRMx promote fails "
+            "closed when --evidence cannot be passed."
+        )
+
     added_from = (cfg.get("addedFromPattern") or "research:{date}").format(
         date=date.today().isoformat()
     )
@@ -224,6 +238,8 @@ def promote_via_crmx(
         str(db),
         "--added-from",
         added_from,
+        "--evidence",
+        str(evidence.resolve()),
     ]
     proc = subprocess.run(
         cmd, cwd=str(root), capture_output=True, text=True, timeout=900
@@ -239,14 +255,14 @@ def promote_via_crmx(
         "command": cmd,
         "stdout": out[-4000:],
         "csv": str(csv_path),
-        "evidence": str(evidence_path) if evidence_path else None,
+        "evidence": str(evidence),
         "db": str(db),
         "added_from": added_from,
         "counts": _parse_crmx_counts(out),
         "note": (
-            "Evidence sidecar was NOT passed to ingest_csv (CSV-only public "
-            "surface). CRMx should ingest the sidecar via a future adapter; "
-            "see config/crmx-compatibility.json."
+            "Evidence sidecar passed to ingest_csv via --evidence "
+            "(schema norman.research.crmx_evidence.v1). Promote remains "
+            "off-by-default; Research never writes Notion or invents Fit."
         ),
     }
     return summary
