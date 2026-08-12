@@ -132,7 +132,10 @@ that is `config/sources.json` and `config/modes.json`, not code.
 When the brief looks right:
 
 ```bash
+export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/daily.py --write --yes --promote
 ```
 
-Then schedule it — see `docs/scheduling.md`.
+Promote fails closed until CRMx path + DB are set. See
+`docs/crmx-handoff-migration.md`. Then schedule it — see `docs/scheduling.md`.

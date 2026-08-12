@@ -1,17 +1,28 @@
 {
   "schemaVersion": "norman.research.v3",
-  "purpose": "Discovery arm. Finds companies that are growing, raising, hiring in NYC, or under office-space pressure, and hands them to NormanAI-crm-core intake. Research qualifies; it never scores and never writes Notion.",
+  "purpose": "Discovery arm. Finds companies that are growing, raising, hiring in NYC, or under office-space pressure, and hands them to NormanAI-CRMx intake. Research qualifies; it never scores Fit and never writes Notion as SoR.",
   "downstream": {
-    "repo": "NormanAI-crm-core",
-    "contract": "docs/crm-core-operating-contract.md §7",
-    "writer": "scripts/crm_intake.py",
-    "scorer": "scripts/crm_score_agent.py",
-    "note": "crm_intake.py is the ONLY Notion writer. Rows land at Status=Research and the CB/Careers/LinkedIn lanes enrich before the score agent scores. Research must not pre-empt any of that."
+    "repo": "NormanAI-CRMx",
+    "contract": "docs/research-operating-contract.md §2 / config/crmx-compatibility.json",
+    "writer": "uv run python -m norman.tools.ingest_csv (CRMx)",
+    "scorer": "NormanAI-CRMx (rescore) — never Research",
+    "note": "CRMx is the sole system of truth. Research proposes via CSV + evidence sidecar. Research must not pre-empt scoring or write Notion."
+  },
+  "crmx": {
+    "path": "../NormanAI-CRMx",
+    "pathEnv": "NORMAN_CRMX_PATH",
+    "dbPath": "",
+    "dbPathEnv": "NORMAN_CRMX_DB",
+    "ingestModule": "norman.tools.ingest_csv",
+    "addedFromPattern": "research:{date}",
+    "uvBin": "uv",
+    "note": "Promotion invokes CRMx's public ingest CLI in the CRMx checkout. Set NORMAN_CRMX_PATH and NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if either is missing or the module is not importable."
   },
   "crmCore": {
     "path": "../Core CRM",
     "intake": "scripts/crm_intake.py",
-    "fundingHandoff": "scripts/crm_funding_handoff.py"
+    "fundingHandoff": "scripts/crm_funding_handoff.py",
+    "note": "Legacy only. Ordinary --promote no longer targets crm-core. Use --promote-legacy-crm-core (or promote.target=legacy_crm_core) explicitly. Funding-event handoff remains on this path until CRMx publishes a replacement CLI."
   },
   "caps": {
     "maxCandidatesPerRun": 60,
@@ -24,13 +35,20 @@
   },
   "promote": {
     "enabled": false,
+    "target": "crmx",
     "maxPerRun": 25,
-    "note": "When enabled (or --promote passed), research invokes crm-core's crm_intake.py directly so companies land on the board with no human step. Capped so a bad batch is a small mess."
+    "note": "Off by default. --promote (or enabled=true) invokes CRMx ingest_csv. target must be crmx or legacy_crm_core; unknown targets fail closed. Capped so a bad batch is a small mess."
   },
   "sink": {
     "csv": {
       "outDir": "out",
-      "filenamePattern": "research-intake-{date}.csv"
+      "filenamePattern": "research-intake-{date}.csv",
+      "crmxFilenamePattern": "research-crmx-intake-{date}.csv"
+    },
+    "evidence": {
+      "outDir": "out",
+      "filenamePattern": "research-evidence-{date}.json",
+      "schemaVersion": "norman.research.crmx_evidence.v1"
     }
   },
   "dedup": {
@@ -38,7 +56,7 @@
     "checkNotionReadOnly": true,
     "notionDatabaseId": "3a33930e-64f4-8002-ac6b-f5f99d632099",
     "notionTokenEnv": "NOTION_TOKEN",
-    "note": "Notion read is a courtesy pre-filter to cut noise. crm_intake.py remains the authority on dedup."
+    "note": "Notion read is a courtesy pre-filter to cut noise. CRMx (or legacy intake) remains the authority on dedup. Research never writes Notion."
   },
   "grok": {
     "baseUrl": "https://api.x.ai/v1",

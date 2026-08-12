@@ -1,21 +1,23 @@
 # NormanAI Research
 
 Discovery arm of NormanAI. Finds companies that are growing, raising, hiring in
-NYC, or under office-space pressure, and hands them to `NormanAI-crm-core`.
+NYC, or under office-space pressure, and hands them to **NormanAI-CRMx** intake.
 
 ```text
-ordinary discovery → candidate CSV ───────→ crm_intake.py ───────────────┐
-approved CB list  → typed funding event → crm_funding_handoff.py ────────┤
-                                                                          ↓
-                                                                  Norman CRM Core
+ordinary discovery → CRMx CSV + evidence JSON → norman.tools.ingest_csv ──┐
+approved CB list  → typed funding event → legacy crm_funding_handoff (*) ─┤
+                                                                           ↓
+                                                                  NormanAI-CRMx
 ```
 
-**Research finds and qualifies. It does not score.** Rows land at
-`Status=Research`; crm-core's Crunchbase, Careers, and LinkedIn lanes enrich
-them, and its score agent scores them. This repo never writes Notion. Ordinary
-candidate CSVs go to Core's `crm_intake.py`; typed funding-event JSON goes to
-Core's `crm_funding_handoff.py`. Neither handoff grants Research write
-authority; Core owns mutation and hard dedup.
+`(*)` Funding-event handoff stays on the legacy crm-core CLI until CRMx
+publishes a replacement. Ordinary `--promote` targets CRMx only.
+
+**Research finds and qualifies. It does not score Fit.** CRMx is the sole
+system of truth. This repo never writes Notion as SoR. Ordinary promote emits a
+Crunchbase-shaped CSV plus a versioned evidence sidecar
+(`nyc_evidence`, `source_urls`, `keyword_hits`) and invokes CRMx
+`ingest_csv`. See `docs/crmx-handoff-migration.md`.
 
 ## Two postures, running at once
 
@@ -59,14 +61,14 @@ Two things, both covered in **`docs/setup.md`**:
 2. Access to the approved Crunchbase saved list in JD's logged-in Chrome.
 
 ```bash
-echo 'XAI_API_KEY=xai-...' >> ~/.normanai/.env   # same .env ladder as crm-core
+echo 'XAI_API_KEY=xai-...' >> ~/.normanai/.env   # same .env ladder as CRMx
 python3 scripts/research_probe.py                # confirms the API, ~5 seconds
 ```
 
 While you're waiting on either, **`docs/grok-automations.md`** has the same four
 searches written as Grok Automations — paste-ready, scheduled, emailed to you.
 No API key, no code. It tests whether the searches find good companies before
-you spend anything on the pipeline that writes them to Notion.
+you spend anything on the pipeline that hands them to CRMx.
 
 ## Run
 
@@ -74,12 +76,15 @@ One command does the day:
 
 ```bash
 python3 scripts/daily.py --dry-run                    # look first
-python3 scripts/daily.py --write --yes --promote      # brief + rows in Notion
+export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
+python3 scripts/daily.py --write --yes --promote      # brief + CRMx ingest
 ```
 
 It walks both lanes, merges them, and writes **one** brief and **one** intake
-call. The browser half is skipped automatically off a Mac, so the same command
-works on the cron host and in CI.
+handoff. The browser half is skipped automatically off a Mac, so the same
+command works on the cron host and in CI. Promote is fail-closed / off unless
+`--promote` (or `promote.enabled`) is set and CRMx path + DB are configured.
 
 Single lanes, when you're tuning one:
 
@@ -99,24 +104,25 @@ python3 scripts/install_funding_watcher_launch_agent.py status
 ```
 
 It reads only the approved `Main Funding - July 2026` saved list, fingerprints
-each funding event, and sends a typed JSON request to CRM Core. Research never
-imports a Notion writer. A terminal Core result closes the event; a retryable
-result remains open for the next run.
+each funding event, and sends a typed JSON request to the legacy Core funding
+CLI (until CRMx publishes a replacement). Research never imports a Notion
+writer. A terminal result closes the event; a retryable result remains open for
+the next run.
 
 The default state root is
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
-Immutable detector receipts are `receipts/<runId>.json`; Core handoff artifacts
+Immutable detector receipts are `receipts/<runId>.json`; handoff artifacts
 are `handoffs/<runId>.request.json` and `handoffs/<runId>.result.json`.
 `latest.json` is the current run summary and `migration-receipt.json` records
 the read-only legacy import.
 
-`--promote` invokes crm-core's `crm_intake.py` on the CSV, so companies reach
-the board with no human step. Research calls the writer rather than becoming
-one. Bounded by `promote.maxPerRun`, intake's hard dedup, and the fact that
-everything lands at `Status=Research` — a machine status the score agent can
-exit without touching anything you own.
+`--promote` invokes CRMx `norman.tools.ingest_csv` on the Crunchbase-shaped
+CSV. Research also writes `out/evidence-*.json` so qualification evidence is
+not silently dropped (CSV ingest does not consume it yet — CRMx adapter needed).
+Bounded by `promote.maxPerRun` and CRMx identity/dedup. Legacy crm-core intake
+remains only behind `--promote-legacy-crm-core`.
 
-Without `--promote` it stops at a CSV and prints the two commands to run by hand.
+Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 
 ## Layout
 
@@ -135,7 +141,10 @@ Without `--promote` it stops at a CSV and prints the two commands to run by hand
 | `scripts/lib/qualify.py` | The broad/tight rules |
 | `scripts/lib/discover.py` | Lane execution and the two prompts |
 | `scripts/lib/grok.py` | Agent Tools client (stdlib only) |
-| `scripts/lib/identity.py` | Dedup keys, mirroring crm-core's normalisation |
+| `scripts/lib/identity.py` | Dedup keys (aligned with CRMx / legacy Core normalisation) |
+| `scripts/lib/sinks.py` | CSV + evidence sidecar + CRMx promote (legacy shim) |
+| `docs/crmx-handoff-migration.md` | Promote cutover notes and example commands |
+| `config/crmx-compatibility.json` | Pinned CRMx public intake surface |
 
 ## Scheduling
 
@@ -160,10 +169,11 @@ lanes: **`docs/scheduling.md`**.
 
 ## Rules
 
-- Research qualifies; crm-core scores. Never write Fit Score, Status, or any
+- Research qualifies; CRMx scores. Never write Fit Score, Status, or any
   JD-owned field.
-- Never write Notion from here.
-- Funding-event writes go only through CRM Core's versioned public CLI.
+- Never write Notion from here as SoR.
+- Ordinary promote goes through CRMx `ingest_csv` + evidence sidecar.
+- Funding-event writes stay on the legacy Core CLI until CRMx publishes one.
 - Unknown ≠ 0.
 - No source URL, no candidate. No keyword hit, no candidate.
 - Tight modes stay tight — if one starts returning 25 companies, it isn't tight

@@ -68,8 +68,9 @@ One command does the whole day:
 python3 scripts/daily.py --write --yes --promote
 ```
 
-It walks both lanes, merges everything, writes **one** brief, and creates the
-Notion rows through `crm_intake.py`. That's the thing to schedule.
+It walks both lanes, merges everything, writes **one** brief, and hands rows to
+NormanAI-CRMx via `norman.tools.ingest_csv` when `--promote` is set. That's the
+thing to schedule.
 
 ---
 
@@ -81,12 +82,12 @@ The two lanes have different requirements, and that decides the host.
 |------|-------|---------|
 | Grok search (9 lanes) | `XAI_API_KEY` | Anywhere — Mac, CI, a server |
 | Crunchbase + Substack | JD's logged-in Chrome | The Mac, only |
-| Promotion to Notion | crm-core checkout + `NOTION_TOKEN` | The Mac, only |
+| Promotion to CRMx | `NORMAN_CRMX_PATH` + `NORMAN_CRMX_DB` + `uv` | The Mac, only |
 
-So the **full** run — both lanes, writing to Notion — lives on the Mac,
-alongside the Codex jobs that already drive the enrichment lanes. `daily.py`
-skips the browser half automatically when Chrome isn't reachable, which is why
-the same command works in CI without a separate script.
+So the **full** run — both lanes, promoting into CRMx — lives on the Mac,
+alongside the jobs that already drive enrichment. `daily.py` skips the browser
+half automatically when Chrome isn't reachable, which is why the same command
+works in CI without a separate script. Research never writes Notion as SoR.
 
 ---
 
@@ -104,9 +105,10 @@ Two runs a weekday, both lanes. The morning one matters most — it lands before
 the enrichment lanes wake up. The afternoon one catches anything that broke
 during the day.
 
-Working directory is the `NormanAI-research` checkout. It needs `XAI_API_KEY`
-and `NOTION_TOKEN` in the environment — the loader reads the same `.env` ladder
-crm-core uses, so one file on the host serves both repos.
+Working directory is the `NormanAI-research` checkout. It needs `XAI_API_KEY`,
+`NORMAN_CRMX_PATH`, and `NORMAN_CRMX_DB` for promote — the loader reads the same
+`.env` ladder CRMx uses, so one file on the host can serve both repos. Notion
+token is optional and read-only (prefilter).
 
 Plain cron works too:
 

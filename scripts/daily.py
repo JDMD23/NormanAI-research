@@ -3,16 +3,17 @@
 
 This is the thing that gets scheduled. It walks both lanes — Grok search and
 the logged-in browser — merges everything, and produces a single morning page
-plus a single write into Norman CRM Core.
+plus a single handoff into NormanAI-CRMx intake.
 
     python3 scripts/daily.py --dry-run          # look first
-    python3 scripts/daily.py --write --yes      # brief + CSV
-    python3 scripts/daily.py --write --yes --promote   # ...and create the rows
+    python3 scripts/daily.py --write --yes      # brief + CSV + evidence
+    python3 scripts/daily.py --write --yes --promote   # ...into CRMx ingest
 
     python3 scripts/daily.py --no-browser --write --yes   # search only (CI)
 
 The browser lane is skipped automatically off a Mac, so the same command works
-on the cron host and in CI — CI just gets the search half.
+on the cron host and in CI — CI just gets the search half. Research never
+writes Notion as SoR.
 """
 
 from __future__ import annotations
@@ -35,8 +36,16 @@ def main() -> int:
     parser.add_argument("--write", action="store_true", help="emit the intake CSV")
     parser.add_argument("--yes", action="store_true", help="required with --write")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--promote", action="store_true",
-                        help="hand the CSV straight to crm-core's crm_intake.py")
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="hand the CRMx CSV to NormanAI-CRMx ingest_csv (off unless set)",
+    )
+    parser.add_argument(
+        "--promote-legacy-crm-core",
+        action="store_true",
+        help="explicit legacy shim: invoke crm-core crm_intake.py instead of CRMx",
+    )
     parser.add_argument("--no-browser", action="store_true",
                         help="skip Crunchbase/Substack (use in CI)")
     parser.add_argument("--no-search", action="store_true",
@@ -50,7 +59,9 @@ def main() -> int:
         raise SystemExit("--write requires --yes")
     if args.write and args.dry_run:
         raise SystemExit("use either --write or --dry-run")
-    if args.promote and not args.write:
+    if args.promote and args.promote_legacy_crm_core:
+        raise SystemExit("use either --promote or --promote-legacy-crm-core")
+    if (args.promote or args.promote_legacy_crm_core) and not args.write:
         raise SystemExit("--promote requires --write --yes (it creates CRM rows)")
 
     key_env = research_config()["grok"].get("apiKeyEnv", "XAI_API_KEY")
