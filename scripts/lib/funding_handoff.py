@@ -526,21 +526,18 @@ def _synthesize_result(
 
 
 def _configured_crmx() -> tuple[Path, Path, str]:
-    override_root = os.environ.get("NORMAN_CRMX_PATH")
+    from lib.config import DEFAULT_CRMX_PATH, crmx_path
+
     override_db = os.environ.get("NORMAN_CRMX_DB")
     config = _load_json(ROOT / "config" / "research.json")
     block = config.get("crmx") or {}
-    if override_root:
-        root = Path(override_root).expanduser()
-    else:
-        value = block.get("path")
-        if not isinstance(value, str) or not value.strip():
-            raise RuntimeError("crmx.path is not configured")
-        root = Path(value).expanduser()
-        if not root.is_absolute():
-            root = (ROOT / root).resolve()
+    # NORMAN_CRMX_PATH wins; else absolute Mac Projects default (not Documents sibling).
+    root = crmx_path()
     if not root.is_absolute():
-        raise RuntimeError("NORMAN_CRMX_PATH / crmx.path must be absolute")
+        raise RuntimeError(
+            "NORMAN_CRMX_PATH / crmx.path must be absolute "
+            f"(production default: {DEFAULT_CRMX_PATH})"
+        )
     root = root.resolve()
     if override_db:
         db = Path(override_db).expanduser().resolve()

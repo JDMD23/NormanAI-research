@@ -77,7 +77,7 @@ One command does the day:
 
 ```bash
 python3 scripts/daily.py --dry-run                    # look first
-export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx  # optional; crmx.path default
 export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/daily.py --write --yes --promote      # brief + CRMx ingest
 ```
@@ -85,7 +85,8 @@ python3 scripts/daily.py --write --yes --promote      # brief + CRMx ingest
 It walks both lanes, merges them, and writes **one** brief and **one** intake
 handoff. The browser half is skipped automatically off a Mac, so the same
 command works on the cron host and in CI. Promote is fail-closed / off unless
-`--promote` (or `promote.enabled`) is set and CRMx path + DB are configured.
+`--promote` (or `promote.enabled`) is set and CRMx path + DB are configured
+(`crmx.path` defaults to the Mac Projects checkout; `NORMAN_CRMX_PATH` overrides).
 
 Single lanes, when you're tuning one:
 

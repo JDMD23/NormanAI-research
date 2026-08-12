@@ -10,7 +10,7 @@
     "note": "CRMx SQLite is the sole system of truth. Funding path: Research extract → CRMx SQLite → Notion projection. CSV drop remains CRMx offline fallback only."
   },
   "crmx": {
-    "path": "../NormanAI-CRMx",
+    "path": "/Users/normanai/Projects/NormanAI-CRMx",
     "pathEnv": "NORMAN_CRMX_PATH",
     "dbPath": "",
     "dbPathEnv": "NORMAN_CRMX_DB",
@@ -20,7 +20,7 @@
     "addedFromPattern": "research:{date}",
     "addedFromPrefix": "crunchbase-watcher",
     "uvBin": "uv",
-    "note": "Ordinary promote uses ingest_csv + evidence. Funding watcher uses funding_ingest → reconcile_sweep --apply → score_batch for the run cohort. Set NORMAN_CRMX_PATH and NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if missing."
+    "note": "Production Mac path is absolute /Users/normanai/Projects/NormanAI-CRMx (Research may live under ~/Documents/NormanAI-research — do not use sibling ../NormanAI-CRMx). NORMAN_CRMX_PATH overrides for CI/tests/other hosts. Ordinary promote uses ingest_csv + evidence. Funding watcher uses funding_ingest → reconcile_sweep --apply → score_batch for the run cohort. Set NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if missing."
   },
   "crmCore": {
     "path": "../Core CRM",
