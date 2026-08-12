@@ -119,10 +119,9 @@ are `handoffs/<runId>.request.json` and `handoffs/<runId>.result.json`.
 the read-only legacy import.
 
 `--promote` invokes CRMx `norman.tools.ingest_csv` on the Crunchbase-shaped
-CSV. Research also writes `out/evidence-*.json` so qualification evidence is
-not silently dropped (CSV ingest does not consume it yet — CRMx adapter needed).
-Bounded by `promote.maxPerRun` and CRMx identity/dedup. Legacy crm-core intake
-remains only behind `--promote-legacy-crm-core`.
+CSV and always passes `out/evidence-*.json` via `--evidence`. Bounded by
+`promote.maxPerRun` and CRMx identity/dedup. Legacy crm-core intake remains
+only behind `--promote-legacy-crm-core`.
 
 Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 
