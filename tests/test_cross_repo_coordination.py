@@ -156,12 +156,13 @@ def _resolve_core_root() -> Path | None:
             )
         return candidate
 
-    candidates = (
+    candidates = [
         RESEARCH_ROOT.parent / "NormanAI-crm-core",
         RESEARCH_ROOT.parent / "normanai-crm-core",
         RESEARCH_ROOT.parent / "crunchbase-funding-watcher",
-        RESEARCH_ROOT.parents[1],
-    )
+    ]
+    if len(RESEARCH_ROOT.parents) > 1:
+        candidates.append(RESEARCH_ROOT.parents[1])
     for candidate in candidates:
         if all((candidate / relative).is_file() for relative in CORE_REQUIRED_PATHS):
             return candidate.resolve()
@@ -457,10 +458,12 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
         "website",
         "linkedin",
         "founders",
+        "investors",
         "description",
         "founded",
         "headquarters",
         "industries",
+        "numberOfFundingRounds",
         "funding",
     }
     assert set(request["events"][0]["funding"]) == {
@@ -470,6 +473,8 @@ def test_canonical_research_fixture_passes_the_real_core_dry_run_cli(
         "amountMinor",
         "currency",
         "totalRaw",
+        "totalAmountMinor",
+        "totalCurrency",
     }
 
     completed = subprocess.run(

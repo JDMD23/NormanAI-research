@@ -22,7 +22,6 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from lib.funding_handoff import (  # noqa: E402
-    REQUEST_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
 )
 from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402

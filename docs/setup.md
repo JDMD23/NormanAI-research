@@ -83,15 +83,16 @@ python3 scripts/funding_watcher.py check --write --yes
 
 Migration copies the preserved 189-event Core ledger without changing it. The
 first command is idempotent and refuses any count, source, schema, or key
-mismatch. Default handoff targets CRMx `ingest_csv` + evidence; legacy
-crm-core requires `--handoff-legacy-crm-core`.
+mismatch. Default handoff targets CRMx `funding_ingest` → `reconcile_sweep` →
+narrow `score_batch` with `--added-from crunchbase-watcher:<date>`.
 
 After Research and CRMx are merged into permanent checkouts and acceptance is
 clean, activate the Codex automation `research-crunchbase-funding-watcher` for
-06:00, 10:00, 13:00, 16:00, and 19:00 New York time. It must run only the
+09:00, 12:00, 15:00, and 18:00 New York time on weekdays. It must run only the
 guarded `check --write --yes --enforce-schedule` command and must verify the
 CRMx checkout + DB before browser work. The legacy LaunchAgent remains
-uninstalled so there is exactly one scheduler.
+uninstalled so there is exactly one scheduler. Mac live checkouts may live
+under `~/Documents/NormanAI-research` — this repo remains the source of truth.
 
 ---
 
