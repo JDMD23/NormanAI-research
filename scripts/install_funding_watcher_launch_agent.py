@@ -209,7 +209,10 @@ def _prerequisites(
         crmx_config = research_config.get("crmx")
         if not isinstance(crmx_config, dict):
             return False, "permanent CRMx path is not configured"
-        crmx_value = crmx_config.get("path")
+        env_name = crmx_config.get("pathEnv") or "NORMAN_CRMX_PATH"
+        if not isinstance(env_name, str) or not env_name.strip():
+            env_name = "NORMAN_CRMX_PATH"
+        crmx_value = os.environ.get(env_name) or crmx_config.get("path")
         if not isinstance(crmx_value, str) or not crmx_value.strip():
             return False, "permanent CRMx path is not configured"
         crmx_root = Path(crmx_value).expanduser()

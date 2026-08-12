@@ -13,6 +13,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Production Mac CRMx checkout. Research may live under ~/Documents/; a relative
+# sibling ../NormanAI-CRMx does not exist there. CI/tests override via env.
+DEFAULT_CRMX_PATH = "/Users/normanai/Projects/NormanAI-CRMx"
+
 
 def _env_file_candidates() -> list[Path]:
     """Same ladder crm-core uses: explicit override, repo-local, then host homes."""
@@ -100,7 +104,11 @@ def crm_core_path() -> Path:
 
 
 def crmx_path() -> Path:
-    """Where the NormanAI-CRMx checkout lives, for promotion."""
+    """Where the NormanAI-CRMx checkout lives, for promotion.
+
+    Prefer NORMAN_CRMX_PATH (must be absolute). Otherwise use crmx.path from
+    research.json, defaulting to the production Mac Projects checkout.
+    """
     cfg = research_config().get("crmx") or {}
     env_name = cfg.get("pathEnv") or "NORMAN_CRMX_PATH"
     override = os.environ.get(env_name)
@@ -109,8 +117,8 @@ def crmx_path() -> Path:
         if not path.is_absolute():
             raise SystemExit(f"{env_name} must be absolute")
         return path.resolve()
-    raw = cfg.get("path") or "../NormanAI-CRMx"
-    path = Path(raw)
+    raw = cfg.get("path") or DEFAULT_CRMX_PATH
+    path = Path(raw).expanduser()
     return path if path.is_absolute() else (ROOT / path).resolve()
 
 

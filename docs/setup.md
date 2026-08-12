@@ -74,7 +74,8 @@ filters, incomplete pages, or result-count drift.
 Before the first supervised run:
 
 ```bash
-export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+# Optional override; config/research.json crmx.path already defaults to this.
+export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx
 export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/funding_watcher.py migrate-legacy-state
 python3 scripts/funding_watcher.py check --dry-run
@@ -91,8 +92,10 @@ clean, activate the Codex automation `research-crunchbase-funding-watcher` for
 09:00, 12:00, 15:00, and 18:00 New York time on weekdays. It must run only the
 guarded `check --write --yes --enforce-schedule` command and must verify the
 CRMx checkout + DB before browser work. The legacy LaunchAgent remains
-uninstalled so there is exactly one scheduler. Mac live checkouts may live
-under `~/Documents/NormanAI-research` — this repo remains the source of truth.
+uninstalled so there is exactly one scheduler. Mac live Research may live under
+`~/Documents/NormanAI-research` while CRMx stays at
+`/Users/normanai/Projects/NormanAI-CRMx` — do not assume a Documents sibling.
+This repo remains the source of truth.
 
 ---
 
@@ -137,10 +140,11 @@ that is `config/sources.json` and `config/modes.json`, not code.
 When the brief looks right:
 
 ```bash
-export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx   # optional if crmx.path is set
 export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/daily.py --write --yes --promote
 ```
 
-Promote fails closed until CRMx path + DB are set. See
-`docs/crmx-handoff-migration.md`. Then schedule it — see `docs/scheduling.md`.
+Promote fails closed until CRMx path + DB are set (`crmx.path` /
+`NORMAN_CRMX_PATH` and `NORMAN_CRMX_DB`). See `docs/crmx-handoff-migration.md`.
+Then schedule it — see `docs/scheduling.md`.

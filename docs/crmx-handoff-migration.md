@@ -25,7 +25,7 @@ python3 scripts/daily.py --write --yes
 Promote into CRMx (fail-closed until path + DB + evidence sidecar are set):
 
 ```bash
-export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx   # optional; also crmx.path default
 export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/daily.py --write --yes --promote
 ```
@@ -83,7 +83,7 @@ Notion is projection only via reconcile. Research never dual-writes MACHINE
 props. CRMx CSV drop folders remain offline/manual fallback only.
 
 ```bash
-export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx   # optional; also crmx.path default
 export NORMAN_CRMX_DB=/absolute/path/to/norman.db
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
@@ -92,8 +92,10 @@ python3 scripts/funding_watcher.py check --write --yes
 Schedule: weekdays **09:00 / 12:00 / 15:00 / 18:00 ET**. Source:
 `main-funding-august-2026/730c458b-…`.
 
-Mac live checkout may be `~/Documents/NormanAI-research`; this GitHub repo's
-`scripts/` + `config/` remain the source of truth.
+Mac live Research may be `~/Documents/NormanAI-research` with CRMx at
+`/Users/normanai/Projects/NormanAI-CRMx` (not a Documents sibling). This GitHub
+repo's `scripts/` + `config/` remain the source of truth; CI overrides via
+`NORMAN_CRMX_PATH`.
 
 ## Fail-closed rules
 
