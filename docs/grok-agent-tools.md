@@ -19,7 +19,7 @@ Built in `scripts/lib/grok.build_request()`:
 
 ```jsonc
 {
-  "model": "grok-4-1-fast",
+  "model": "grok-4.6",
   "messages": [{ "role": "user", "content": "…sourcing prompt…" }],
   "tools": [
     {
@@ -87,7 +87,6 @@ structured-output enforcement varies by model.
 
 ## Model choice
 
-`config/research.json` → `grok.model`, default `grok-4-1-fast`. Fast and cheap
-suits this job: the search tool does the retrieval, and the model's work is
-extraction and filtering rather than deep reasoning. Move to a larger Grok model
-if candidate quality disappoints — it is a one-line config change.
+`config/research.json` → `grok.model`, default `grok-4.6` (xAI API model id).
+The search tool does the retrieval; the model extracts and filters. Changing
+models is a one-line config change.
