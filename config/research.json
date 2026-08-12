@@ -22,7 +22,7 @@
     "path": "../Core CRM",
     "intake": "scripts/crm_intake.py",
     "fundingHandoff": "scripts/crm_funding_handoff.py",
-    "note": "Legacy only. Ordinary --promote no longer targets crm-core. Use --promote-legacy-crm-core (or promote.target=legacy_crm_core) explicitly. Funding-event handoff remains on this path until CRMx publishes a replacement CLI."
+    "note": "Legacy only. Ordinary --promote and funding-watcher handoff target CRMx by default. Use --promote-legacy-crm-core / --handoff-legacy-crm-core (or target=legacy_crm_core) explicitly."
   },
   "caps": {
     "maxCandidatesPerRun": 60,

@@ -144,6 +144,7 @@ def config(tmp_path: Path, *, enabled: bool = True) -> dict:
         "researchDailyCheckLimit": 15,
         "stateDirectory": str(tmp_path / "state"),
         "legacyStateDirectory": str(tmp_path / "legacy"),
+        "handoffTarget": "crmx",
         "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
         "sources": [
             {
@@ -1393,7 +1394,7 @@ def test_cli_exit_contract(
     monkeypatch.setattr(
         funding_watcher,
         "_production_dependencies",
-        lambda loaded: object(),
+        lambda loaded, **kwargs: object(),
     )
     monkeypatch.setattr(
         funding_watcher,
@@ -1416,7 +1417,7 @@ def test_invalid_seed_top_is_cli_misuse_before_dependencies(
     monkeypatch.setattr(
         funding_watcher,
         "_production_dependencies",
-        lambda loaded: touched.append("dependencies") or object(),
+        lambda loaded, **kwargs: touched.append("dependencies") or object(),
     )
 
     assert funding_watcher.main(
@@ -1455,7 +1456,7 @@ def test_migration_schema_failure_exits_78_without_runtime_dependencies(
     monkeypatch.setattr(
         funding_watcher,
         "_production_dependencies",
-        lambda loaded: touched.append("dependencies"),
+        lambda loaded, **kwargs: touched.append("dependencies"),
     )
     monkeypatch.setattr(
         funding_watcher,

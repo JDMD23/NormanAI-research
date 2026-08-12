@@ -5,13 +5,14 @@ NYC, or under office-space pressure, and hands them to **NormanAI-CRMx** intake.
 
 ```text
 ordinary discovery → CRMx CSV + evidence JSON → norman.tools.ingest_csv ──┐
-approved CB list  → typed funding event → legacy crm_funding_handoff (*) ─┤
+approved CB list  → typed funding JSON → CSV+evidence → ingest_csv (*) ───┤
                                                                            ↓
                                                                   NormanAI-CRMx
 ```
 
-`(*)` Funding-event handoff stays on the legacy crm-core CLI until CRMx
-publishes a replacement. Ordinary `--promote` targets CRMx only.
+`(*)` Funding watcher still emits typed `funding_handoff.v1` for the ledger,
+then adapts to the same CRMx `ingest_csv` + evidence path. Legacy crm-core is
+explicit-only (`--handoff-legacy-crm-core`).
 
 **Research finds and qualifies. It does not score Fit.** CRMx is the sole
 system of truth. This repo never writes Notion as SoR. Ordinary promote emits a
@@ -103,11 +104,12 @@ python3 scripts/funding_watcher.py check --write --yes
 python3 scripts/install_funding_watcher_launch_agent.py status
 ```
 
-It reads only the approved `Main Funding - July 2026` saved list, fingerprints
-each funding event, and sends a typed JSON request to the legacy Core funding
-CLI (until CRMx publishes a replacement). Research never imports a Notion
-writer. A terminal result closes the event; a retryable result remains open for
-the next run.
+It reads only the approved `Main Funding` saved list, fingerprints each funding
+event, writes typed JSON plus CRMx CSV/evidence, and invokes
+`norman.tools.ingest_csv` (`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB`). Research
+never imports a Notion writer. A terminal result closes the event; a retryable
+result remains open for the next run. Legacy Core remains only behind
+`--handoff-legacy-crm-core`.
 
 The default state root is
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
@@ -117,10 +119,9 @@ are `handoffs/<runId>.request.json` and `handoffs/<runId>.result.json`.
 the read-only legacy import.
 
 `--promote` invokes CRMx `norman.tools.ingest_csv` on the Crunchbase-shaped
-CSV. Research also writes `out/evidence-*.json` so qualification evidence is
-not silently dropped (CSV ingest does not consume it yet — CRMx adapter needed).
-Bounded by `promote.maxPerRun` and CRMx identity/dedup. Legacy crm-core intake
-remains only behind `--promote-legacy-crm-core`.
+CSV and always passes `out/evidence-*.json` via `--evidence`. Bounded by
+`promote.maxPerRun` and CRMx identity/dedup. Legacy crm-core intake remains
+only behind `--promote-legacy-crm-core`.
 
 Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 
@@ -172,8 +173,10 @@ lanes: **`docs/scheduling.md`**.
 - Research qualifies; CRMx scores. Never write Fit Score, Status, or any
   JD-owned field.
 - Never write Notion from here as SoR.
-- Ordinary promote goes through CRMx `ingest_csv` + evidence sidecar.
-- Funding-event writes stay on the legacy Core CLI until CRMx publishes one.
+- Ordinary promote and funding-watcher handoff go through CRMx `ingest_csv` +
+  evidence sidecar.
+- Legacy crm-core only behind `--promote-legacy-crm-core` /
+  `--handoff-legacy-crm-core`.
 - Unknown ≠ 0.
 - No source URL, no candidate. No keyword hit, no candidate.
 - Tight modes stay tight — if one starts returning 25 companies, it isn't tight

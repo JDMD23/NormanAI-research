@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import plistlib
-import re
 import shlex
 import stat
 import subprocess
@@ -22,7 +21,6 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from lib.funding_handoff import (  # noqa: E402
-    REQUEST_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
 )
 from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
@@ -31,7 +29,7 @@ from lib.funding_watcher_state import FundingWatcherLedger  # noqa: E402
 LABEL = "com.normanai.research.crunchbase-funding-watcher"
 CORE_LABEL = "com.normanai.crm-core.crunchbase-funding-watcher"
 WATCHER_RELATIVE_PATH = Path("scripts/funding_watcher.py")
-CORE_HANDOFF_RELATIVE_PATH = Path("scripts/crm_funding_handoff.py")
+CRMX_INGEST_MODULE = "norman.tools.ingest_csv"
 SCHEDULE = (
     {"Hour": 6, "Minute": 0},
     {"Hour": 10, "Minute": 0},
@@ -171,6 +169,61 @@ def _bootstrap_complete(ledger: FundingWatcherLedger, source_url: str) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
+def _crmx_module_present(root: Path, module: str) -> bool:
+    parts = module.split(".")
+    for base in (
+        root.joinpath("src", *parts),
+        root.joinpath(*parts),
+    ):
+        if base.with_suffix(".py").is_file():
+            return True
+        if (base / "__init__.py").is_file() or (base / "__main__.py").is_file():
+            return True
+    return (root / "tools" / "ingest_csv.py").is_file() and module.endswith(
+        "ingest_csv"
+    )
+
+
+def _resolve_crmx_root(research_config: dict[str, Any], repo_root: Path) -> Path:
+    crmx = research_config.get("crmx")
+    if not isinstance(crmx, dict):
+        raise RuntimeError("permanent NormanAI-CRMx path is not configured")
+    env_name = str(crmx.get("pathEnv") or "NORMAN_CRMX_PATH")
+    override = (os.environ.get(env_name) or "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise RuntimeError(f"{env_name} must be absolute")
+        return path.resolve()
+    raw = crmx.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError("permanent NormanAI-CRMx path is not configured")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
+def _resolve_crmx_db(research_config: dict[str, Any], repo_root: Path) -> Path:
+    crmx = research_config.get("crmx")
+    if not isinstance(crmx, dict):
+        raise RuntimeError("NORMAN_CRMX_DB (or crmx.dbPath) is unset")
+    env_name = str(crmx.get("dbPathEnv") or "NORMAN_CRMX_DB")
+    override = (os.environ.get(env_name) or "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise RuntimeError(f"{env_name} must be absolute")
+        return path.resolve()
+    raw = (crmx.get("dbPath") or "").strip()
+    if not raw:
+        raise RuntimeError("NORMAN_CRMX_DB (or crmx.dbPath) is unset")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
 def _prerequisites(
     *,
     repo_root: Path,
@@ -207,43 +260,27 @@ def _prerequisites(
             )
         ):
             return False, "Research funding ledger is not bootstrap-complete"
-        core_config = research_config.get("crmCore")
-        if not isinstance(core_config, dict):
-            return False, "permanent CRM Core path is not configured"
-        core_value = core_config.get("path")
-        if not isinstance(core_value, str) or not core_value.strip():
-            return False, "permanent CRM Core path is not configured"
-        if core_config.get("fundingHandoff") != (
-            CORE_HANDOFF_RELATIVE_PATH.as_posix()
-        ):
-            return False, "CRM Core funding handoff CLI path is invalid"
-        core_root = Path(core_value).expanduser()
-        if not core_root.is_absolute():
-            core_root = root / core_root
-        core_root = core_root.resolve()
-        if not _permanent(core_root):
-            return False, "activation requires a permanent CRM Core checkout"
-        core_script = core_root / CORE_HANDOFF_RELATIVE_PATH
-        if not core_script.is_file() or not _tracked(
-            runner, core_root, CORE_HANDOFF_RELATIVE_PATH
-        ):
-            return False, "CRM Core funding handoff CLI must be tracked by Git"
-        text = core_script.read_text(encoding="utf-8")
-        request_match = re.search(
-            r'^REQUEST_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
+        handoff_target = str(watcher_config.get("handoffTarget") or "crmx").strip()
+        if handoff_target != "crmx":
+            return (
+                False,
+                "funding watcher handoffTarget must be crmx for LaunchAgent "
+                "activation (legacy crm-core is explicit CLI only)",
+            )
+        if watcher_config.get("crmResultSchemaVersion") != RESULT_SCHEMA_VERSION:
+            return False, "Research funding result schema does not match adapter"
+        crmx_root = _resolve_crmx_root(research_config, root)
+        if not _permanent(crmx_root):
+            return False, "activation requires a permanent NormanAI-CRMx checkout"
+        if not crmx_root.is_dir():
+            return False, "NormanAI-CRMx checkout not found"
+        module = str(
+            (research_config.get("crmx") or {}).get("ingestModule")
+            or CRMX_INGEST_MODULE
         )
-        result_match = re.search(
-            r'^RESULT_SCHEMA_VERSION = "([^"]+)"', text, re.MULTILINE
-        )
-        if (
-            request_match is None
-            or result_match is None
-            or request_match.group(1) != REQUEST_SCHEMA_VERSION
-            or result_match.group(1) != RESULT_SCHEMA_VERSION
-            or watcher_config.get("crmResultSchemaVersion")
-            != RESULT_SCHEMA_VERSION
-        ):
-            return False, "Research and CRM handoff schemas do not match"
+        if not _crmx_module_present(crmx_root, module):
+            return False, f"CRMx ingest module {module!r} not found"
+        _resolve_crmx_db(research_config, root)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return False, str(exc)
     return True, ""

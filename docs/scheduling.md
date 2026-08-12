@@ -32,15 +32,18 @@ The exact durable artifacts are:
 
 - `ledger.json` — event lifecycle and completed slots
 - `receipts/<runId>.json` — immutable detector receipt
-- `handoffs/<runId>.request.json` — typed request handed to Core
-- `handoffs/<runId>.result.json` — durable Core result
+- `handoffs/<runId>.request.json` — typed funding request
+- `handoffs/<runId>.crmx.csv` / `.evidence.json` — CRMx adapter inputs
+- `handoffs/<runId>.result.json` — durable ledger-compatible result
 - `latest.json` — replaceable summary of the latest run
 - `migration-receipt.json` — proof of the read-only legacy import
 
 An event moves `observed → handoff_pending → terminal` only after a validated
-Core result is durable. `retryable` remains nonterminal and is eligible for a
-later handoff. Core terminal results are `created`, `queued_existing`,
-`duplicate_event`, `rejected_identity`, or `ambiguous_review`.
+handoff result is durable. `retryable` remains nonterminal and is eligible for a
+later handoff. Terminal results are `created`, `queued_existing`,
+`duplicate_event`, `rejected_identity`, or `ambiguous_review`. Default promote
+targets CRMx `ingest_csv`; legacy crm-core requires
+`--handoff-legacy-crm-core`.
 
 Watcher exit `0` covers clean completion, no change, disabled, outside
 schedule, and already-checked/bootstrap-complete runs. Exit `75` means retry

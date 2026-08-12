@@ -35,7 +35,6 @@ class FakeRunner:
         plutil_code: int = 0,
         plutil_error: OSError | None = None,
         tracked: bool = True,
-        core_tracked: bool = True,
     ):
         self.loaded = loaded
         self.bootout_code = bootout_code
@@ -45,7 +44,6 @@ class FakeRunner:
         self.plutil_code = plutil_code
         self.plutil_error = plutil_error
         self.tracked = tracked
-        self.core_tracked = core_tracked
         self.calls: list[list[str]] = []
         self.bootout_plist_existed: list[bool] = []
         self.plist_observations: list[
@@ -91,13 +89,8 @@ class FakeRunner:
                 stderr="plist validation failed",
             )
         if command and command[0] == "git":
-            tracked = (
-                self.core_tracked
-                if command[-1] == "scripts/crm_funding_handoff.py"
-                else self.tracked
-            )
             return SimpleNamespace(
-                returncode=0 if tracked else 1, stdout="", stderr=""
+                returncode=0 if self.tracked else 1, stdout="", stderr=""
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -114,28 +107,39 @@ class FakeRunner:
 def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
     repo = tmp_path / "NormanAI-research"
     home = tmp_path / "home"
-    core = tmp_path / "Core CRM"
+    crmx = tmp_path / "NormanAI-CRMx"
     (repo / "scripts").mkdir(parents=True, exist_ok=True)
     (repo / "config").mkdir(exist_ok=True)
-    (core / "scripts").mkdir(parents=True, exist_ok=True)
+    module = crmx / "src" / "norman" / "tools" / "ingest_csv.py"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text("# mock ingest\n")
+    (crmx / "src" / "norman" / "tools" / "__init__.py").write_text("")
+    (crmx / "src" / "norman" / "__init__.py").write_text("")
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
     (repo / "scripts" / "funding_watcher.py").write_text("# watcher\n")
-    (core / "scripts" / "crm_funding_handoff.py").write_text(
-        'REQUEST_SCHEMA_VERSION = "norman.research.funding_handoff.v1"\n'
-        'RESULT_SCHEMA_VERSION = "norman.crm_core.funding_handoff_result.v1"\n'
-    )
     (repo / "config" / "research.json").write_text(
         json.dumps(
             {
+                "crmx": {
+                    "path": str(crmx),
+                    "pathEnv": "NORMAN_CRMX_PATH",
+                    "dbPath": str(db),
+                    "dbPathEnv": "NORMAN_CRMX_DB",
+                    "ingestModule": "norman.tools.ingest_csv",
+                },
                 "crmCore": {
-                    "path": str(core),
+                    "path": str(tmp_path / "Core CRM"),
                     "fundingHandoff": "scripts/crm_funding_handoff.py",
-                }
+                    "note": "legacy only",
+                },
             }
         )
     )
     (repo / "config" / "funding-watcher.json").write_text(
         json.dumps(
             {
+                "handoffTarget": "crmx",
                 "crmResultSchemaVersion": "norman.crm_core.funding_handoff_result.v1",
                 "stateDirectory": str(
                     home
@@ -167,7 +171,7 @@ def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
             }
         )
     )
-    return repo, home, core
+    return repo, home, crmx
 
 
 def prior_plist_payload() -> bytes:
@@ -270,10 +274,10 @@ def test_install_requires_yes_and_refuses_feature_worktree(tmp_path: Path) -> No
     ) == 69
 
 
-def test_install_requires_bootstrap_core_cli_schema_and_no_core_plist(
+def test_install_requires_bootstrap_crmx_ingest_and_no_core_plist(
     tmp_path: Path,
 ) -> None:
-    repo, home, core = setup_checkout(tmp_path)
+    repo, home, crmx = setup_checkout(tmp_path)
     runner = FakeRunner()
     ledger = next(home.rglob("ledger.json"))
     ledger.unlink()
@@ -300,10 +304,7 @@ def test_install_requires_bootstrap_core_cli_schema_and_no_core_plist(
         uid=501,
     ) == 69
     legacy.unlink()
-    (core / "scripts" / "crm_funding_handoff.py").write_text(
-        'REQUEST_SCHEMA_VERSION = "wrong"\n'
-        'RESULT_SCHEMA_VERSION = "wrong"\n'
-    )
+    (crmx / "src" / "norman" / "tools" / "ingest_csv.py").unlink()
     assert main(
         ["install", "--yes"],
         repo_root=repo,
@@ -388,25 +389,6 @@ def test_install_accepts_supervised_bootstrap_completion_marker(
     ) == 0
 
 
-def test_install_requires_tracked_permanent_core_handoff_cli(
-    tmp_path: Path,
-) -> None:
-    repo, home, _ = setup_checkout(tmp_path)
-    runner = FakeRunner(core_tracked=False)
-
-    assert main(
-        ["install", "--yes"],
-        repo_root=repo,
-        home=home,
-        runner=runner,
-        uid=501,
-    ) == 69
-    assert not any(call[0] == "launchctl" for call in runner.calls)
-    assert not (
-        home / "Library/LaunchAgents" / f"{LABEL}.plist"
-    ).exists()
-
-
 def test_install_requires_tracked_permanent_research_watcher(
     tmp_path: Path,
 ) -> None:
@@ -423,13 +405,11 @@ def test_install_requires_tracked_permanent_research_watcher(
     assert not any(call[0] == "launchctl" for call in runner.calls)
 
 
-def test_install_requires_exact_configured_core_handoff_cli_path(
-    tmp_path: Path,
-) -> None:
+def test_install_requires_crmx_db_path(tmp_path: Path) -> None:
     repo, home, _ = setup_checkout(tmp_path)
     research_config = repo / "config/research.json"
     payload = json.loads(research_config.read_text())
-    payload["crmCore"]["fundingHandoff"] = "scripts/private_handoff.py"
+    payload["crmx"]["dbPath"] = ""
     research_config.write_text(json.dumps(payload))
     runner = FakeRunner()
 
@@ -443,14 +423,14 @@ def test_install_requires_exact_configured_core_handoff_cli_path(
     assert not any(call[0] == "launchctl" for call in runner.calls)
 
 
-def test_install_rejects_core_feature_worktree(tmp_path: Path) -> None:
-    repo, home, core = setup_checkout(tmp_path)
-    worktree_core = tmp_path / ".worktrees" / "core"
-    worktree_core.parent.mkdir()
-    core.rename(worktree_core)
+def test_install_rejects_crmx_feature_worktree(tmp_path: Path) -> None:
+    repo, home, crmx = setup_checkout(tmp_path)
+    worktree_crmx = tmp_path / ".worktrees" / "crmx"
+    worktree_crmx.parent.mkdir()
+    crmx.rename(worktree_crmx)
     research_config = repo / "config/research.json"
     payload = json.loads(research_config.read_text())
-    payload["crmCore"]["path"] = str(worktree_core)
+    payload["crmx"]["path"] = str(worktree_crmx)
     research_config.write_text(json.dumps(payload))
     runner = FakeRunner()
 
@@ -464,43 +444,26 @@ def test_install_rejects_core_feature_worktree(tmp_path: Path) -> None:
     assert not any(call[0] == "launchctl" for call in runner.calls)
 
 
-@pytest.mark.parametrize(
-    ("request_schema", "result_schema", "configured_result_schema"),
-    [
-        (
-            "wrong.request.v1",
-            "norman.crm_core.funding_handoff_result.v1",
-            "norman.crm_core.funding_handoff_result.v1",
-        ),
-        (
-            "norman.research.funding_handoff.v1",
-            "wrong.result.v1",
-            "norman.crm_core.funding_handoff_result.v1",
-        ),
-        (
-            "norman.research.funding_handoff.v1",
-            "norman.crm_core.funding_handoff_result.v1",
-            "wrong.configured-result.v1",
-        ),
-    ],
-)
-def test_install_requires_each_handoff_schema_boundary_to_match(
+def test_install_requires_crmx_handoff_target_and_result_schema(
     tmp_path: Path,
-    request_schema: str,
-    result_schema: str,
-    configured_result_schema: str,
 ) -> None:
-    repo, home, core = setup_checkout(tmp_path)
-    (core / "scripts/crm_funding_handoff.py").write_text(
-        f'REQUEST_SCHEMA_VERSION = "{request_schema}"\n'
-        f'RESULT_SCHEMA_VERSION = "{result_schema}"\n'
-    )
+    repo, home, _ = setup_checkout(tmp_path)
     watcher_config = repo / "config/funding-watcher.json"
     payload = json.loads(watcher_config.read_text())
-    payload["crmResultSchemaVersion"] = configured_result_schema
+    payload["handoffTarget"] = "legacy_crm_core"
     watcher_config.write_text(json.dumps(payload))
     runner = FakeRunner()
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        runner=runner,
+        uid=501,
+    ) == 69
 
+    payload["handoffTarget"] = "crmx"
+    payload["crmResultSchemaVersion"] = "wrong.configured-result.v1"
+    watcher_config.write_text(json.dumps(payload))
     assert main(
         ["install", "--yes"],
         repo_root=repo,

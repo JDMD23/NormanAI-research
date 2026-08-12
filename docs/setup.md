@@ -73,6 +73,8 @@ drift.
 Before the first supervised run:
 
 ```bash
+export NORMAN_CRMX_PATH=/absolute/path/to/NormanAI-CRMx
+export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
 python3 scripts/funding_watcher.py migrate-legacy-state
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
@@ -80,13 +82,14 @@ python3 scripts/funding_watcher.py check --write --yes
 
 Migration copies the preserved 189-event Core ledger without changing it. The
 first command is idempotent and refuses any count, source, schema, or key
-mismatch.
+mismatch. Default handoff targets CRMx `ingest_csv` + evidence; legacy
+crm-core requires `--handoff-legacy-crm-core`.
 
-After both repositories are merged into permanent checkouts and acceptance is
+After Research and CRMx are merged into permanent checkouts and acceptance is
 clean, activate the Codex automation `research-crunchbase-funding-watcher` for
 06:00, 10:00, 13:00, 16:00, and 19:00 New York time. It must run only the
-guarded `check --write --yes --enforce-schedule` command and must verify both
-production checkouts before browser work. The legacy LaunchAgent remains
+guarded `check --write --yes --enforce-schedule` command and must verify the
+CRMx checkout + DB before browser work. The legacy LaunchAgent remains
 uninstalled so there is exactly one scheduler.
 
 ---
