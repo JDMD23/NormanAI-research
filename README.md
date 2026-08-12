@@ -145,6 +145,8 @@ Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 | `scripts/lib/identity.py` | Dedup keys (aligned with CRMx / legacy Core normalisation) |
 | `scripts/lib/sinks.py` | CSV + evidence sidecar + CRMx promote (legacy shim) |
 | `docs/crmx-handoff-migration.md` | Promote cutover notes and example commands |
+| `docs/open-code-review.md` | Alibaba OCR GitHub Action setup (secrets/vars + rules) |
+| `.opencodereview/rule.json` | Research-specific OCR review rules |
 | `config/crmx-compatibility.json` | Pinned CRMx public intake surface |
 
 ## Scheduling
@@ -182,3 +184,12 @@ lanes: **`docs/scheduling.md`**.
 - Tight modes stay tight — if one starts returning 25 companies, it isn't tight
   any more.
 - Biotech and therapeutics are excluded outright; crypto is flagged, not dropped.
+
+## Open Code Review
+
+PRs are auto-reviewed by Alibaba Open Code Review (pinned `v1.9.1`), with
+research-specific rules (qualify≠score, no Notion SoR writes, fail-closed
+CRMx promote, Unknown≠0, evidence sidecar required). Configure secrets
+`OCR_LLM_URL` / `OCR_LLM_AUTH_TOKEN` and variables `OCR_LLM_MODEL` /
+`OCR_LLM_USE_ANTHROPIC` in repo settings — do not invent values. Details:
+**`docs/open-code-review.md`**.

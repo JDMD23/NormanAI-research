@@ -1,0 +1,123 @@
+# OpenCodeReview - GitHub Actions PR Auto-Review
+#
+# Pattern shared with NormanAI-CRMx: official Alibaba OCR reusable action,
+# pinned release, research-specific rules from the trusted base checkout.
+#
+# Based on:
+# https://github.com/alibaba/open-code-review/blob/v1.9.1/examples/github_actions/ocr-review.yml
+#
+# Required secrets/vars (Settings -> Secrets and variables -> Actions):
+#   secret   OCR_LLM_URL            LLM API endpoint
+#   secret   OCR_LLM_AUTH_TOKEN     LLM auth token (mapped to OCR_LLM_TOKEN)
+#   variable OCR_LLM_MODEL          model name
+#   variable OCR_LLM_USE_ANTHROPIC  'true' for Anthropic, 'false' for OpenAI-compatible
+#
+# Do not invent values for these — configure them in the repo settings.
+# See docs/open-code-review.md.
+
+name: OpenCodeReview PR Review
+
+# Conditional concurrency group.
+#
+# GitHub Actions evaluates concurrency BEFORE job-level if-conditions. With a
+# flat group (ocr-<pr_number>), every comment on the PR — even an unrelated
+# conversation reply that will be skipped — enters the same group and, because
+# cancel-in-progress is true, cancels any in-progress review. Matching events
+# (PR events + /open-code-review comments) share a per-PR group; non-matching
+# comments land in a unique noop-<run_id> group.
+concurrency:
+  group: >-
+    ${{
+      (
+        github.event_name == 'pull_request_target'
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (
+            github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'COLLABORATOR'
+          )
+          && (
+            startsWith(github.event.comment.body, '/open-code-review')
+            || startsWith(github.event.comment.body, '@open-code-review')
+          )
+        )
+      )
+      && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+      || format('noop-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+on:
+  # pull_request_target so secrets are available for fork PRs. Safe because the
+  # reusable action only reads the diff and does not execute PR code; custom
+  # rules are loaded from the trusted base checkout.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'pull_request_target'
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && (
+          startsWith(github.event.comment.body, '/open-code-review')
+          || startsWith(github.event.comment.body, '@open-code-review')
+        )
+      )
+    steps:
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+
+      - name: Run OpenCodeReview
+        # v1.9.1 — pin action SHA; npm package via ocr_version
+        uses: alibaba/open-code-review@fc0bf59bd729de73970fff8727c4f607beaeb6a1
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          ocr_version: "1.9.1"
+          language: English
+          # Trusted rules from the base-branch checkout (not the PR head).
+          rule: .opencodereview/rule.json
+          background: >-
+            NormanAI-research is a discovery/qualify arm only. It finds
+            companies and hands Crunchbase-shaped CSV plus a versioned evidence
+            sidecar to NormanAI-CRMx ingest_csv. Research qualifies; CRMx is the
+            sole system of truth and scores Fit. This repo never writes Notion
+            as SoR. Promote is fail-closed to CRMx and must always pass the
+            evidence sidecar via --evidence. Unknown numeric facts must stay
+            blank, never 0.
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}

@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "path": "**/*.{py,json,yml,yaml,md}",
+      "merge_system_rule": true,
+      "rule": "NormanAI-research operating contract (enforce on this diff):\n1) Qualify ≠ score: Research may qualify candidates for CRM intake; it must never invent, write, or rank Fit Score / Status / other JD-owned scoring fields. Flag any Fit Score prediction, scoring lane, or SoR mutation of Fit.\n2) No Notion SoR writes: Research must not add Notion page/database writers, property patches, or SDK create/update/delete calls that mutate Notion as system of record. Read-only Notion prefilter queries are allowed; writes are not. Flag new Notion write clients or handoffs that invent Notion instead of CRMx.\n3) Promote fail-closed to CRMx: Ordinary promote and funding-watcher handoff must target NormanAI-CRMx `norman.tools.ingest_csv` and fail closed when NORMAN_CRMX_PATH, NORMAN_CRMX_DB, or the evidence sidecar is missing/unset. Do not silently skip promote, invent dry-run ingest flags, or default-on promote. Legacy crm-core only behind explicit `--promote-legacy-crm-core` / `--handoff-legacy-crm-core`.\n4) Unknown ≠ 0: Nullable money/count facts must emit blank/null/empty CSV cells, never numeric 0, when the value was not found. Flag defaults that coerce missing amounts/headcount to 0.\n5) Evidence sidecar must travel with promote: When promoting to CRMx, always pass `out/evidence-*.json` (`norman.research.crmx_evidence.v1` carrying nyc_evidence, source_urls, keyword_hits) via `--evidence`. Flag promote paths that drop the sidecar, make evidence optional, or call ingest_csv without `--evidence`."
+    },
+    {
+      "path": "scripts/**/*.py",
+      "merge_system_rule": true,
+      "rule": "Focus on promote/sink/qualify/handoff safety: CRMx ingest wiring, evidence path required, no Notion writers, unknown numbers stay blank, qualify-only (no Fit scoring)."
+    },
+    {
+      "path": "tests/**/*.py",
+      "merge_system_rule": true,
+      "rule": "Prefer tests that keep fail-closed promote, evidence-required ingest, Unknown≠0, and no-Notion-write contracts intact. Flag deletions/weakenings of those pins."
+    }
+  ]
+}
