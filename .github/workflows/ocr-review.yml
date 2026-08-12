@@ -107,6 +107,8 @@ jobs:
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          llm_auth_header: x-api-key
+          llm_extra_body: '{}'
           ocr_version: "1.9.1"
           language: English
           # Trusted rules from the base-branch checkout (not the PR head).
