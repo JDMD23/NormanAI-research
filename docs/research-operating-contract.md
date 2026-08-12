@@ -15,15 +15,16 @@ Companion migration notes: `docs/crmx-handoff-migration.md` and
 
 ```text
 ordinary research → CRMx CSV + evidence JSON → norman.tools.ingest_csv ──┐
-strict CB watcher → typed JSON v1 → legacy crm_funding_handoff.py (*) ───┤
+strict CB watcher → typed JSON v1 → CSV+evidence → ingest_csv (*) ───────┤
                                                                           ↓
                                                          NormanAI-CRMx SoR
                                                                           ↓
                                               enrich → score → operator view
 ```
 
-`(*)` Funding-event handoff remains on the legacy crm-core CLI until CRMx
-publishes a public replacement. Ordinary `--promote` does **not** use crm-core.
+`(*)` Funding watcher keeps typed `funding_handoff.v1` for ledger/audit, then
+adapts to CRMx `ingest_csv` + evidence. Legacy `crm_funding_handoff.py` is
+explicit-only (`--handoff-legacy-crm-core`).
 
 Research is upstream of CRMx. Ordinary candidates use the Crunchbase-shaped CSV
 plus a versioned evidence sidecar. Research has no Notion mutation client and no
@@ -36,8 +37,8 @@ handoffs:
 
 1. **Ordinary promote** — CRMx CSV → `uv run python -m norman.tools.ingest_csv`
    (plus evidence sidecar `norman.research.crmx_evidence.v1`).
-2. **Strict funding watcher** — typed JSON → legacy `crm_funding_handoff.py`
-   until a CRMx CLI exists (documented gap; fail closed, do not invent Notion).
+2. **Strict funding watcher** — typed JSON → same CRMx `ingest_csv` + evidence
+   adapter (no typed CRMx funding CLI verified; do not invent Notion).
 
 Neither handoff makes Research a writer or grants it Notion property authority:
 
@@ -189,9 +190,9 @@ The only allowlisted source is:
 `https://www.crunchbase.com/discover/saved/main-funding-july-2026/730c458b-149c-4a0a-9684-7146e7258993`
 
 Research owns source validation, browser reading, the event-key ledger,
-immutable receipts, scheduling, and retry. Until CRMx publishes a funding
-handoff CLI, Core's public CLI still owns mutation for this path. The event key
-hashes the exact source URL, canonical Crunchbase organization URL, funding
+immutable receipts, scheduling, and retry. Mutation goes through CRMx
+`ingest_csv` via `NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB` (fail-closed). The event
+key hashes the exact source URL, canonical Crunchbase organization URL, funding
 date, normalized funding type, integer minor units, and ISO currency.
 
 The preserved Core ledger is migrated read-only only when it proves 189 events:

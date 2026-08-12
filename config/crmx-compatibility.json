@@ -11,12 +11,19 @@
   },
   "evidenceSidecarSchemaVersion": "norman.research.crmx_evidence.v1",
   "fundingHandoff": {
-    "status": "not_ported",
-    "note": "Strict funding watcher still uses norman.research.funding_handoff.v1 → legacy crm-core crm_funding_handoff.py. No public CRMx funding-handoff CLI was verified. Do not retarget that path until CRMx publishes one."
+    "status": "adapted_via_ingest_csv",
+    "requestSchema": "norman.research.funding_handoff.v1",
+    "adapter": "Research maps typed funding events → CRMx CSV + norman.research.crmx_evidence.v1 sidecar, then calls norman.tools.ingest_csv --evidence (same public surface as ordinary promote).",
+    "typedCli": "none verified — CRMx returned 404 to this agent's token and no public funding-handoff CLI was found. Do not invent Notion/Fit writers from Research.",
+    "resultSynthesis": "On successful ingest_csv, Research synthesizes ledger-compatible norman.crm_core.funding_handoff_result.v1 with state=created and pageId=crmx:ingest:<eventKey>. Follow-up for CRMx: publish a typed funding CLI that returns durable per-event terminal states (created/queued_existing/duplicate_event/…) so Research can stop synthesizing.",
+    "legacyFlag": "--handoff-legacy-crm-core",
+    "env": ["NORMAN_CRMX_PATH", "NORMAN_CRMX_DB"]
   },
   "legacyShim": {
     "flag": "--promote-legacy-crm-core",
+    "fundingFlag": "--handoff-legacy-crm-core",
     "configTarget": "legacy_crm_core",
-    "cli": "scripts/crm_intake.py"
+    "cli": "scripts/crm_intake.py",
+    "fundingCli": "scripts/crm_funding_handoff.py"
   }
 }

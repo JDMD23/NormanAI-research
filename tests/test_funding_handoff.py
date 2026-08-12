@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -11,11 +12,16 @@ from pathlib import Path
 import pytest
 
 from lib.crunchbase_saved_list import FundingObservation
+from lib.candidates import CRMX_CSV_COLUMNS
 from lib.funding_handoff import (
     _configured_core_path,
     build_handoff,
     invoke_crm_handoff,
+    invoke_crmx_funding_handoff,
+    resolve_funding_handoff_target,
+    synthesize_crmx_handoff_result,
     validate_result,
+    write_crmx_funding_artifacts,
     write_handoff,
 )
 from lib.funding_watcher_state import funding_event_key
@@ -485,3 +491,224 @@ def test_core_path_override_must_be_absolute(
     monkeypatch.setenv("NORMAN_CRM_CORE_PATH", "../Core CRM")
     with pytest.raises(RuntimeError, match="absolute"):
         _configured_core_path()
+
+
+def _fake_crmx(tmp_path: Path) -> Path:
+    root = tmp_path / "NormanAI-CRMx"
+    module = root / "src" / "norman" / "tools" / "ingest_csv.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# mock ingest\n", encoding="utf-8")
+    (root / "src" / "norman" / "tools" / "__init__.py").write_text("")
+    (root / "src" / "norman" / "__init__.py").write_text("")
+    return root
+
+
+def test_resolve_funding_handoff_target_defaults_to_crmx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NORMAN_FUNDING_HANDOFF_TARGET", raising=False)
+    assert resolve_funding_handoff_target() == "crmx"
+    assert resolve_funding_handoff_target(legacy=True) == "legacy_crm_core"
+    with pytest.raises(RuntimeError, match="unknown funding handoff target"):
+        resolve_funding_handoff_target(configured="notion")
+
+
+def test_write_crmx_funding_artifacts_maps_csv_evidence_and_keeps_unknown_blank(
+    tmp_path: Path,
+) -> None:
+    request = request_payload(observation())
+    # Non-USD must not invent FX into the CSV money column.
+    request["events"][0]["funding"]["currency"] = "EUR"
+    csv_path = tmp_path / "out.crmx.csv"
+    evidence_path = tmp_path / "out.evidence.json"
+    write_crmx_funding_artifacts(
+        request, csv_path=csv_path, evidence_path=evidence_path
+    )
+    with csv_path.open(encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == CRMX_CSV_COLUMNS
+        row = next(reader)
+    assert row["Organization Name"] == "Weave"
+    assert row["Last Funding Amount (in USD)"] == ""
+    assert "0" not in {
+        row["Last Funding Amount (in USD)"],
+        row["Total Funding Amount (in USD)"],
+        row["Number of Funding Rounds"],
+    }
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["schemaVersion"] == "norman.research.crmx_evidence.v1"
+    assert evidence["candidates"][0]["event_key"]
+    assert evidence["candidates"][0]["source_urls"]
+    assert evidence["candidates"][0]["mode"] == "funding"
+    assert "fit_score" not in evidence["candidates"][0]
+
+
+def test_write_crmx_funding_artifacts_converts_usd_minor_units(
+    tmp_path: Path,
+) -> None:
+    request = request_payload(observation())
+    csv_path = tmp_path / "out.crmx.csv"
+    evidence_path = tmp_path / "out.evidence.json"
+    write_crmx_funding_artifacts(
+        request, csv_path=csv_path, evidence_path=evidence_path
+    )
+    with csv_path.open(encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["Last Funding Amount (in USD)"] == "13500000"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["candidates"][0]["last_funding_usd"] == 13_500_000.0
+
+
+def test_synthesize_crmx_result_is_ledger_compatible() -> None:
+    request = request_payload(observation())
+    dry = synthesize_crmx_handoff_result(request, mode="dry_run")
+    assert dry["mode"] == "dry_run"
+    assert "pageId" not in dry["events"][0]
+    validate_result(dry, request=request)
+    written = synthesize_crmx_handoff_result(request, mode="write")
+    assert written["events"][0]["pageId"].startswith("crmx:ingest:")
+    validate_result(written, request=request)
+
+
+def test_invoke_crmx_funding_handoff_calls_ingest_csv_with_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    monkeypatch.setattr("lib.sinks.shutil.which", lambda _: "/usr/bin/uv")
+
+    request = request_payload(observation())
+    request_path = (tmp_path / "handoffs" / f"{request['runId']}.request.json").resolve()
+    result_path = (tmp_path / "handoffs" / f"{request['runId']}.result.json").resolve()
+    write_handoff(request_path, request)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        assert kwargs["cwd"] == str(root)
+        return subprocess.CompletedProcess(
+            cmd, 0, '{"counts":{"created":1}}\n', ""
+        )
+
+    monkeypatch.setattr("lib.sinks.subprocess.run", fake_run)
+    result = invoke_crmx_funding_handoff(
+        request_path, result_path, write=True
+    )
+    assert result["mode"] == "write"
+    assert result["events"][0]["state"] == "created"
+    assert calls and calls[0][:5] == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "norman.tools.ingest_csv",
+    ]
+    assert "--evidence" in calls[0]
+    evidence_arg = Path(calls[0][calls[0].index("--evidence") + 1])
+    assert evidence_arg.is_file()
+    assert (request_path.parent / f"{request['runId']}.crmx.csv").is_file()
+
+
+def test_invoke_crmx_dry_run_preflights_without_calling_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    monkeypatch.setattr("lib.sinks.shutil.which", lambda _: "/usr/bin/uv")
+
+    request = request_payload(observation())
+    request_path = (tmp_path / f"{request['runId']}.request.json").resolve()
+    result_path = (tmp_path / f"{request['runId']}.result.json").resolve()
+    write_handoff(request_path, request)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("lib.sinks.subprocess.run", fake_run)
+    result = invoke_crmx_funding_handoff(
+        request_path, result_path, write=False
+    )
+    assert result["mode"] == "dry_run"
+    assert calls == []
+    assert result_path.is_file()
+
+
+def test_invoke_crmx_fails_closed_without_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.delenv("NORMAN_CRMX_DB", raising=False)
+    from lib import config
+
+    config.load_config.cache_clear()
+    monkeypatch.setitem(config.research_config()["crmx"], "dbPath", "")
+    request = request_payload(observation())
+    request_path = (tmp_path / "request.json").resolve()
+    write_handoff(request_path, request)
+    with pytest.raises(RuntimeError, match="retryable"):
+        invoke_crmx_funding_handoff(
+            request_path, (tmp_path / "result.json").resolve(), write=True
+        )
+    config.load_config.cache_clear()
+
+
+def test_invoke_crm_handoff_defaults_to_crmx_without_core_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _fake_crmx(tmp_path)
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    monkeypatch.setattr("lib.sinks.shutil.which", lambda _: "/usr/bin/uv")
+    request = request_payload(observation())
+    request_path = (tmp_path / "request.json").resolve()
+    result_path = (tmp_path / "result.json").resolve()
+    write_handoff(request_path, request)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, '{"counts":{}}\n', "")
+
+    monkeypatch.setattr("lib.sinks.subprocess.run", fake_run)
+    result = invoke_crm_handoff(request_path, result_path, write=True)
+    assert result["events"][0]["reason"] == "crmx_ingest_csv_accepted"
+
+
+def test_invoke_crm_handoff_legacy_flag_uses_core_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "Core CRM"
+    script = core / "scripts" / "crm_funding_handoff.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    request = request_payload(observation())
+    request_path = (tmp_path / "request.json").resolve()
+    result_path = (tmp_path / "result.json").resolve()
+    write_handoff(request_path, request)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        payload = result_payload(request, mode="write")
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    validated = invoke_crm_handoff(
+        request_path,
+        result_path,
+        write=True,
+        legacy=True,
+        core_path=core,
+    )
+    assert validated["mode"] == "write"
+    assert "crm_funding_handoff.py" in calls[0][1]
