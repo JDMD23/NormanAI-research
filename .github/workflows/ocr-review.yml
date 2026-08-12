@@ -107,6 +107,8 @@ jobs:
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          # Override action default thinking-disabled payload with an empty body.
+          llm_extra_body: '{}'
           ocr_version: "1.9.1"
           language: English
           # Trusted rules from the base-branch checkout (not the PR head).
