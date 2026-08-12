@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
@@ -13,6 +14,7 @@ import pytest
 from lib.crunchbase_saved_list import FundingObservation
 from lib.funding_handoff import (
     _configured_core_path,
+    _lookup_entities,
     build_handoff,
     invoke_crm_handoff,
     invoke_legacy_crm_core_handoff,
@@ -274,6 +276,45 @@ def test_validate_result_rejects_retryable_event_in_complete_result() -> None:
 
     with pytest.raises(ValueError, match="terminal"):
         validate_result(result, request=request)
+
+
+def test_lookup_entities_opens_normal_path_sqlite_and_maps_urls(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "norman.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE companies ("
+            "entity_id TEXT NOT NULL, "
+            "crunchbase_url TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO companies (entity_id, crunchbase_url) VALUES (?, ?)",
+            [
+                ("ent-weave", "https://www.crunchbase.com/organization/weave"),
+                ("ent-other", "https://www.crunchbase.com/organization/other"),
+                ("ent-blank", "  "),
+                ("ent-null", None),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    found = _lookup_entities(
+        db_path,
+        [
+            "https://www.crunchbase.com/organization/Weave",
+            "https://www.crunchbase.com/organization/missing",
+            "",
+            None,
+        ],
+    )
+
+    assert found == {
+        "https://www.crunchbase.com/organization/weave": "ent-weave",
+    }
 
 
 def test_invoke_crmx_dry_run_writes_csv_and_skips_uv(

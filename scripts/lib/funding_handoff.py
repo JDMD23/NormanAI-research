@@ -606,8 +606,12 @@ def _lookup_entities(db_path: Path, urls: Sequence[Any]) -> dict[str, str]:
     }
     if not wanted:
         return {}
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # Open via a normal filesystem path. URI mode (file:...?mode=ro) fails in
+    # some Mac runner/sandbox environments with OperationalError even when the
+    # same file opens fine with a plain path (and CRMx funding_ingest uses that).
+    conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("PRAGMA query_only=ON")
         rows = conn.execute(
             "SELECT entity_id, crunchbase_url FROM companies "
             "WHERE crunchbase_url IS NOT NULL AND trim(crunchbase_url) != ''"
