@@ -200,6 +200,27 @@ def test_promote_via_crmx_fails_closed_without_module(
         promote_via_crmx(tmp_path / "x.csv", evidence_path=tmp_path / "ev.json")
 
 
+def test_promote_via_crmx_does_not_treat_core_intake_as_crmx_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: bare core/intake.py must not satisfy ingest_csv preflight.
+
+    `"intake" in "norman.tools.ingest_csv"` is true, so a substring check against
+    an unrelated intake file was fail-open. Promote must require the real module.
+    """
+    root = tmp_path / "not-really-crmx"
+    decoy = root / "core" / "intake.py"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("# unrelated intake decoy\n", encoding="utf-8")
+    db = tmp_path / "norman.sqlite"
+    db.write_text("")
+    evidence = write_evidence([_candidate()], tmp_path / "ev.json")
+    monkeypatch.setenv("NORMAN_CRMX_PATH", str(root))
+    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    with pytest.raises(SinkError, match="ingest module"):
+        promote_via_crmx(tmp_path / "x.csv", evidence_path=evidence)
+
+
 def test_promote_via_crmx_refuses_dry_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

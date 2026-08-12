@@ -314,7 +314,14 @@ def promote_via_intake(csv_path: Path, dry_run: bool = False) -> dict[str, Any]:
 
 
 def _crmx_module_present(root: Path, module: str) -> bool:
-    """Best-effort check that the ingest module exists in the CRMx checkout."""
+    """Best-effort check that the ingest module exists in the CRMx checkout.
+
+    Accepts src-layout, flat package layout, or tools/ingest_csv.py when the
+    configured module ends with ingest_csv. Deliberately does **not** treat a
+    bare `core/intake.py` as proof: `"intake" in "norman.tools.ingest_csv"` is
+    true, so that check was fail-open for any checkout with an unrelated
+    intake file. Match install_funding_watcher_launch_agent._crmx_module_present.
+    """
     parts = module.split(".")
     # Prefer src-layout, then flat package layout.
     candidates = [
@@ -330,8 +337,6 @@ def _crmx_module_present(root: Path, module: str) -> bool:
     if (root / "tools" / "ingest_csv.py").is_file() and module.endswith(
         "ingest_csv"
     ):
-        return True
-    if (root / "core" / "intake.py").is_file() and "intake" in module:
         return True
     return False
 
