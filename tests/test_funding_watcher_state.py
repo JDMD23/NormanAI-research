@@ -175,6 +175,26 @@ def test_ledger_enforces_event_lifecycle_and_retryable_is_not_terminal(
         )
 
 
+def test_queued_drop_terminal_does_not_require_page_id(tmp_path: Path) -> None:
+    event_key = hashlib.sha256(b"drop-event").hexdigest()
+    path = tmp_path / "ledger.json"
+    ledger = FundingWatcherLedger(path)
+    ledger.observe(event_key, observed_at="2026-07-29T14:00:00+00:00")
+    ledger.mark_handoff_pending(
+        event_key, run_id="run-drop", observed_at="2026-07-29T14:01:00+00:00"
+    )
+    ledger.mark_terminal(
+        event_key,
+        outcome="queued_drop",
+        page_id=None,
+        observed_at="2026-07-29T14:02:00+00:00",
+    )
+    reloaded = FundingWatcherLedger(path)
+    assert reloaded.events[event_key]["state"] == "terminal"
+    assert reloaded.events[event_key]["outcome"] == "queued_drop"
+    assert reloaded.events[event_key]["pageId"] is None
+
+
 def test_nonbaseline_terminal_outcomes_require_handoff_pending(
     tmp_path: Path,
 ) -> None:

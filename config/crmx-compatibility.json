@@ -11,21 +11,26 @@
   },
   "evidenceSidecarSchemaVersion": "norman.research.crmx_evidence.v1",
   "fundingHandoff": {
-    "status": "crmx_sqlite_sor",
+    "status": "crmx_csv_drop",
     "requestSchema": "norman.research.funding_handoff.v1",
     "resultSchema": "norman.crmx.funding_handoff_result.v1",
     "addedFromPrefix": "crunchbase-watcher",
-    "ingest": "norman.tools.funding_ingest <csv> <db> --added-from crunchbase-watcher:<YYYY-MM-DD>",
-    "postIngest": [
-      "norman.tools.reconcile_sweep <db> --apply",
-      "norman.tools.score_batch <db> --added-from crunchbase-watcher:<YYYY-MM-DD> --all --apply"
+    "dropDir": "/Users/normanai/Drops/crunchbase",
+    "dropDirEnv": "NORMAN_CRMX_FUNDING_DROP",
+    "dropFilename": "crunchbase-watcher-<YYYY-MM-DD>-<runId>.csv",
+    "researchStopsAt": "CRMx-shaped CSV drop. Terminal result state queued_drop.",
+    "pipelineOwns": [
+      "com.normanai.crmx.funding-drop LaunchAgent ingest",
+      "norman.tools.funding_ingest",
+      "norman.tools.reconcile_sweep --apply",
+      "norman.tools.score_batch (COS-named / funding-lane policy in CRMx)"
     ],
     "csvContract": "Full Crunchbase export headers (founded, HQ, industries, investors, funding fields, …). Unknown ≠ 0.",
-    "csvDropFallback": "CRMx CSV drop folder remains offline/manual fallback only — not the primary watcher path.",
-    "notion": "Projection via reconcile_sweep only. Research never dual-writes MACHINE props.",
+    "csvDrop": "Primary watcher path. Aligned with CRMx config/mac-paths.json crunchbase drop.",
+    "notion": "Projection via Pipeline/CRMx reconcile only. Research never dual-writes MACHINE props and never scores Fit.",
     "schedule": "Weekdays ET 09:00 / 12:00 / 15:00 / 18:00; funded-today filter (America/New_York)",
     "source": "https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993",
-    "env": ["NORMAN_CRMX_PATH", "NORMAN_CRMX_DB"]
+    "env": ["NORMAN_CRMX_FUNDING_DROP"]
   },
   "legacyShim": {
     "flag": "--promote-legacy-crm-core",

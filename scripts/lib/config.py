@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[2]
 # sibling ../NormanAI-CRMx does not exist there. CI/tests override via env.
 DEFAULT_CRMX_PATH = "/Users/normanai/Projects/NormanAI-CRMx"
 
+# CRMx mac-paths.json crunchbase drop. Research writes CSV here; Pipeline/CRMx
+# funding-drop LaunchAgent (com.normanai.crmx.funding-drop) owns ingest/score.
+DEFAULT_FUNDING_DROP_DIR = "/Users/normanai/Drops/crunchbase"
+
 
 def _env_file_candidates() -> list[Path]:
     """Same ladder crm-core uses: explicit override, repo-local, then host homes."""
@@ -120,6 +124,28 @@ def crmx_path() -> Path:
     raw = cfg.get("path") or DEFAULT_CRMX_PATH
     path = Path(raw).expanduser()
     return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def funding_drop_dir() -> Path:
+    """Directory where the funding watcher drops CRMx-shaped CSVs.
+
+    Prefer NORMAN_CRMX_FUNDING_DROP (must be absolute). Otherwise use
+    crmx.fundingDropDir from research.json, defaulting to the Mac Drops path
+    aligned with CRMx config/mac-paths.json.
+    """
+    cfg = research_config().get("crmx") or {}
+    env_name = cfg.get("fundingDropDirEnv") or "NORMAN_CRMX_FUNDING_DROP"
+    override = os.environ.get(env_name, "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise SystemExit(f"{env_name} must be absolute")
+        return path.resolve()
+    raw = cfg.get("fundingDropDir") or DEFAULT_FUNDING_DROP_DIR
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise SystemExit("crmx.fundingDropDir must be absolute")
+    return path
 
 
 def crmx_db_path() -> Path | None:

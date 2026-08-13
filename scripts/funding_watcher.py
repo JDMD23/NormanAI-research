@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guarded Research-owned Crunchbase funding detector → CRMx SQLite handoff."""
+"""Guarded Research-owned Crunchbase funding detector → CRMx CSV drop."""
 
 from __future__ import annotations
 
@@ -69,6 +69,7 @@ CONFIG_ERROR_STATUSES = {
 TERMINAL_CORE_STATES = {
     "created",
     "queued_existing",
+    "queued_drop",
     "duplicate_event",
     "rejected_identity",
     "ambiguous_review",
@@ -533,6 +534,7 @@ def run_bootstrap(
         counts = {
             "created": 0,
             "queued_existing": 0,
+            "queued_drop": 0,
             "baselined": 0,
             "already_terminal": already_terminal,
         }

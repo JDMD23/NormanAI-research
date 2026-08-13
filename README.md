@@ -5,14 +5,15 @@ NYC, or under office-space pressure, and hands them to **NormanAI-CRMx** intake.
 
 ```text
 ordinary discovery → CRMx CSV + evidence JSON → norman.tools.ingest_csv ──┐
-approved CB list  → typed funding JSON → CSV+evidence → ingest_csv (*) ───┤
+approved CB list  → typed funding JSON → CSV drop → Pipeline/CRMx ingest ─┤
                                                                            ↓
                                                                   NormanAI-CRMx
 ```
 
-`(*)` Funding watcher still emits typed `funding_handoff.v1` for the ledger,
-then adapts to the same CRMx `ingest_csv` + evidence path. Legacy crm-core is
-explicit-only (`--handoff-legacy-crm-core`).
+`(*)` Funding watcher emits typed `funding_handoff.v1` for the ledger, writes a
+Crunchbase-shaped CSV to `/Users/normanai/Drops/crunchbase`, and stops.
+Pipeline / CRMx `com.normanai.crmx.funding-drop` owns ingest, score, and
+project. Legacy crm-core is explicit-only (`--handoff-legacy-crm-core`).
 
 **Research finds and qualifies. It does not score Fit.** CRMx is the sole
 system of truth. This repo never writes Notion as SoR. Ordinary promote emits a
@@ -106,17 +107,21 @@ python3 scripts/install_funding_watcher_launch_agent.py status
 ```
 
 It reads the approved `Main Funding - August 2026` saved list, keeps companies
-funded **today** (ET), fingerprints each event, writes typed JSON plus a full
-Crunchbase-shaped CSV, and invokes CRMx `funding_ingest` → `reconcile_sweep`
-→ narrow `score_batch` (`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB`). Research never
-dual-writes Notion MACHINE fields. A terminal result closes the event; a
-retryable result remains open for the next run. CSV drop remains CRMx offline
-fallback only.
+funded **today** (ET), fingerprints each event, and writes typed JSON plus a
+full Crunchbase-shaped CSV to the CRMx drop
+(`/Users/normanai/Drops/crunchbase`, overridable via `NORMAN_CRMX_FUNDING_DROP`).
+**Research stops at that CSV.** Pipeline / CRMx LaunchAgent
+`com.normanai.crmx.funding-drop` owns ingest, reconcile, and score. Research
+never scores Fit and never runs `reconcile_sweep --apply`. A terminal
+`queued_drop` result closes the event in the Research ledger; a retryable
+result remains open for the next run.
 
 The default state root is
 `~/Library/Application Support/NormanAI/Research/crunchbase-funding-watcher/`.
 Immutable detector receipts are `receipts/<runId>.json`; handoff artifacts
-are `handoffs/<runId>.request.json` and `handoffs/<runId>.result.json`.
+are `handoffs/<runId>.request.json`, `handoffs/<runId>.crmx.csv`, and
+`handoffs/<runId>.result.json`. The live drop copy is
+`crunchbase-watcher-<YYYY-MM-DD>-<runId>.csv` in the drop directory.
 `latest.json` is the current run summary and `migration-receipt.json` records
 the read-only legacy import.
 
@@ -139,7 +144,7 @@ Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 | `scripts/research_browse.py` | Browser lanes (Crunchbase + Substack) |
 | `scripts/lib/pipeline.py` | The shared tail: qualify → dedup → emit → brief |
 | `scripts/research_probe.py` | One live call to verify the xAI request shape |
-| `scripts/funding_watcher.py` | Strict saved-list detector and CRMx funding ingest handoff |
+| `scripts/funding_watcher.py` | Strict saved-list detector; writes CRMx CSV drop |
 | `config/funding-watcher.json` | Exact source, four weekday slots, caps, and state roots |
 | `scripts/lib/qualify.py` | The broad/tight rules |
 | `scripts/lib/discover.py` | Lane execution and the two prompts |
@@ -154,8 +159,9 @@ Without `--promote` it stops at CSV + evidence and prints the CRMx command.
 ## Scheduling
 
 The strict watcher runs through the single approved Codex runtime dispatcher at
-**09:00, 12:00, 15:00, and 18:00 ET (weekdays)**. Handoff is CRMx SQLite→Notion projection; the LaunchAgent
-must remain uninstalled. The broader browser run is offset to 07:15 and 14:15.
+**09:00, 12:00, 15:00, and 18:00 ET (weekdays)**. Handoff is a CSV drop;
+Pipeline/CRMx owns ingest → score → Notion projection. The broader browser run
+is offset to 07:15 and 14:15.
 
 The shared browser lock is
 `~/Library/Application Support/NormanAI/shared/browser.lock`; all Crunchbase
