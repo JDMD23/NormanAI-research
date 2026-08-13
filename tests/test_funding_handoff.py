@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
@@ -14,7 +14,6 @@ import pytest
 from lib.crunchbase_saved_list import FundingObservation
 from lib.funding_handoff import (
     _configured_core_path,
-    _lookup_entities,
     build_handoff,
     invoke_crm_handoff,
     invoke_legacy_crm_core_handoff,
@@ -278,58 +277,25 @@ def test_validate_result_rejects_retryable_event_in_complete_result() -> None:
         validate_result(result, request=request)
 
 
-def test_lookup_entities_opens_normal_path_sqlite_and_maps_urls(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "norman.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "CREATE TABLE companies ("
-            "entity_id TEXT NOT NULL, "
-            "crunchbase_url TEXT)"
-        )
-        conn.executemany(
-            "INSERT INTO companies (entity_id, crunchbase_url) VALUES (?, ?)",
-            [
-                ("ent-weave", "https://www.crunchbase.com/organization/weave"),
-                ("ent-other", "https://www.crunchbase.com/organization/other"),
-                ("ent-blank", "  "),
-                ("ent-null", None),
-            ],
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    found = _lookup_entities(
-        db_path,
-        [
-            "https://www.crunchbase.com/organization/Weave",
-            "https://www.crunchbase.com/organization/missing",
-            "",
-            None,
-        ],
+def test_validate_result_allows_queued_drop_without_page_id() -> None:
+    request = request_payload(observation())
+    result = result_payload(request)
+    result["events"][0] = {
+        "eventKey": request["events"][0]["eventKey"],
+        "state": "queued_drop",
+        "reason": "crmx_csv_drop",
+    }
+    assert validate_result(result, request=request)["events"][0]["state"] == (
+        "queued_drop"
     )
 
-    assert found == {
-        "https://www.crunchbase.com/organization/weave": "ent-weave",
-    }
 
-
-def test_invoke_crmx_dry_run_writes_csv_and_skips_uv(
+def test_invoke_crmx_dry_run_writes_preview_csv_and_skips_drop_and_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    crmx = tmp_path / "NormanAI-CRMx"
-    db = crmx / "data" / "norman.db"
-    db.parent.mkdir(parents=True)
-    db.write_bytes(b"")
-    (crmx / "src/norman/tools").mkdir(parents=True)
-    (crmx / "src/norman/tools/funding_ingest.py").write_text("# stub\n")
-    research = Path(__file__).resolve().parents[1] / "config" / "research.json"
-    # Point env overrides at temp CRMx
-    monkeypatch.setenv("NORMAN_CRMX_PATH", str(crmx))
-    monkeypatch.setenv("NORMAN_CRMX_DB", str(db))
+    drop = tmp_path / "Drops" / "crunchbase"
+    drop.mkdir(parents=True)
+    monkeypatch.setenv("NORMAN_CRMX_FUNDING_DROP", str(drop))
     request = request_payload(observation())
     request_path = tmp_path / "request.json"
     result_path = tmp_path / "result.json"
@@ -348,9 +314,119 @@ def test_invoke_crmx_dry_run_writes_csv_and_skips_uv(
     )
 
     assert validated["mode"] == "dry_run"
+    assert validated["events"][0]["state"] == "queued_drop"
     assert validated["events"][0]["reason"] == "crmx_dry_run_preview"
+    assert "pageId" not in validated["events"][0]
     assert request_path.with_suffix(".crmx.csv").is_file()
+    assert list(drop.glob("*.csv")) == []
     assert calls == []
+
+
+def test_invoke_write_publishes_csv_drop_and_does_not_spawn_cooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drop = tmp_path / "Drops" / "crunchbase"
+    drop.mkdir(parents=True)
+    monkeypatch.setenv("NORMAN_CRMX_FUNDING_DROP", str(drop))
+    request = request_payload(observation())
+    request_path = tmp_path / "handoffs" / "request.json"
+    result_path = tmp_path / "handoffs" / "result.json"
+    write_handoff(request_path, request)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    validated = invoke_crm_handoff(
+        request_path,
+        result_path,
+        write=True,
+    )
+
+    drop_csv = drop / "crunchbase-watcher-2026-07-29-20260729T120604Z.csv"
+    ledger_csv = request_path.with_suffix(".crmx.csv")
+    meta_path = result_path.with_suffix(".crmx-meta.json")
+    assert validated["mode"] == "write"
+    assert validated["events"][0]["state"] == "queued_drop"
+    assert validated["events"][0]["reason"] == "crmx_csv_drop"
+    assert "pageId" not in validated["events"][0]
+    assert ledger_csv.is_file()
+    assert drop_csv.is_file()
+    assert drop_csv.read_bytes() == ledger_csv.read_bytes()
+    header = drop_csv.read_text(encoding="utf-8").splitlines()[0]
+    assert "Organization Name" in header
+    assert "Last Funding Amount (in USD)" in header
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["boundary"] == "research_stops_at_csv_drop"
+    assert meta["dropPath"] == str(drop_csv)
+    assert meta["addedFrom"] == "crunchbase-watcher:2026-07-29"
+    assert calls == []
+
+
+def test_invoke_write_refuses_to_overwrite_an_existing_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drop = tmp_path / "Drops" / "crunchbase"
+    drop.mkdir(parents=True)
+    monkeypatch.setenv("NORMAN_CRMX_FUNDING_DROP", str(drop))
+    request = request_payload(observation())
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    write_handoff(request_path, request)
+    existing = drop / "crunchbase-watcher-2026-07-29-20260729T120604Z.csv"
+    existing.write_text("already-there\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        invoke_crm_handoff(request_path, result_path, write=True)
+
+    assert existing.read_text(encoding="utf-8") == "already-there\n"
+
+
+def _command_string_lists(tree: ast.AST) -> list[list[str]]:
+    found: list[list[str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.List):
+            continue
+        values: list[str] = []
+        for elt in node.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                values.append(elt.value)
+        if values:
+            found.append(values)
+    return found
+
+
+def test_research_scripts_do_not_invoke_score_batch_or_reconcile_apply() -> None:
+    """CI pin: Research handoff must not cook SoR (fleet audit 2026-08-12)."""
+    scripts_root = Path(__file__).resolve().parents[1] / "scripts"
+    cook_modules = {
+        "norman.tools.score_batch",
+        "score_batch",
+        "norman.tools.funding_ingest",
+        "funding_ingest",
+    }
+    reconcile_modules = {
+        "norman.tools.reconcile_sweep",
+        "reconcile_sweep",
+    }
+    violations: list[str] = []
+    for path in sorted(scripts_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        relative = path.relative_to(scripts_root)
+        for args in _command_string_lists(tree):
+            if any(item in cook_modules for item in args):
+                violations.append(
+                    f"{relative}: command list invokes cook {args!r}"
+                )
+            if "--apply" in args and any(
+                item in reconcile_modules for item in args
+            ):
+                violations.append(
+                    f"{relative}: command list invokes reconcile --apply {args!r}"
+                )
+    assert violations == []
 
 
 def test_legacy_invoke_forwards_core_dispatcher_lease_fd(

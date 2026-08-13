@@ -111,20 +111,17 @@ class FakeRunner:
 def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
     repo = tmp_path / "NormanAI-research"
     home = tmp_path / "home"
-    crmx = tmp_path / "NormanAI-CRMx"
+    drop = tmp_path / "Drops" / "crunchbase"
     (repo / "scripts").mkdir(parents=True, exist_ok=True)
     (repo / "config").mkdir(exist_ok=True)
-    (crmx / "src/norman/tools").mkdir(parents=True, exist_ok=True)
-    (crmx / "data").mkdir(parents=True, exist_ok=True)
+    drop.mkdir(parents=True, exist_ok=True)
     (repo / "scripts" / "funding_watcher.py").write_text("# watcher\n")
-    (crmx / "src/norman/tools/funding_ingest.py").write_text("# ingest\n")
-    (crmx / "data/norman.db").write_bytes(b"")
     (repo / "config" / "research.json").write_text(
         json.dumps(
             {
                 "crmx": {
-                    "path": str(crmx),
-                    "db": "data/norman.db",
+                    "fundingDropDir": str(drop),
+                    "fundingDropDirEnv": "NORMAN_CRMX_FUNDING_DROP",
                     "addedFromPrefix": "crunchbase-watcher",
                 }
             }
@@ -164,7 +161,7 @@ def setup_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
             }
         )
     )
-    return repo, home, crmx
+    return repo, home, drop
 
 
 def prior_plist_payload() -> bytes:
@@ -381,11 +378,11 @@ def test_install_accepts_supervised_bootstrap_completion_marker(
     ) == 0
 
 
-def test_install_requires_crmx_funding_ingest_module(
+def test_install_requires_funding_drop_directory(
     tmp_path: Path,
 ) -> None:
-    repo, home, crmx = setup_checkout(tmp_path)
-    (crmx / "src/norman/tools/funding_ingest.py").unlink()
+    repo, home, drop = setup_checkout(tmp_path)
+    drop.rmdir()
     runner = FakeRunner()
 
     assert main(
@@ -399,6 +396,25 @@ def test_install_requires_crmx_funding_ingest_module(
     assert not (
         home / "Library/LaunchAgents" / f"{LABEL}.plist"
     ).exists()
+
+
+def test_install_succeeds_without_crmx_checkout_or_funding_ingest(
+    tmp_path: Path,
+) -> None:
+    repo, home, _drop = setup_checkout(tmp_path)
+    runner = FakeRunner()
+
+    assert main(
+        ["install", "--yes"],
+        repo_root=repo,
+        home=home,
+        python_path=Path("/usr/bin/python3"),
+        runner=runner,
+        uid=501,
+    ) == 0
+    assert (home / "Library/LaunchAgents" / f"{LABEL}.plist").exists()
+
+
 def test_install_requires_tracked_permanent_research_watcher(
     tmp_path: Path,
 ) -> None:
@@ -415,30 +431,13 @@ def test_install_requires_tracked_permanent_research_watcher(
     assert not any(call[0] == "launchctl" for call in runner.calls)
 
 
-def test_install_requires_crmx_db_file(
+def test_install_requires_absolute_funding_drop_directory(
     tmp_path: Path,
 ) -> None:
-    repo, home, crmx = setup_checkout(tmp_path)
-    (crmx / "data/norman.db").unlink()
-    runner = FakeRunner()
-
-    assert main(
-        ["install", "--yes"],
-        repo_root=repo,
-        home=home,
-        runner=runner,
-        uid=501,
-    ) == 69
-    assert not any(call[0] == "launchctl" for call in runner.calls)
-def test_install_rejects_crmx_feature_worktree(tmp_path: Path) -> None:
-    repo, home, crmx = setup_checkout(tmp_path)
-    worktree_crmx = tmp_path / ".worktrees" / "crmx"
-    worktree_crmx.parent.mkdir()
-    crmx.rename(worktree_crmx)
-    # recreate ingest under worktree path after rename
+    repo, home, _drop = setup_checkout(tmp_path)
     research_config = repo / "config/research.json"
     payload = json.loads(research_config.read_text())
-    payload["crmx"]["path"] = str(worktree_crmx)
+    payload["crmx"]["fundingDropDir"] = "Drops/crunchbase"
     research_config.write_text(json.dumps(payload))
     runner = FakeRunner()
 
@@ -450,6 +449,8 @@ def test_install_rejects_crmx_feature_worktree(tmp_path: Path) -> None:
         uid=501,
     ) == 69
     assert not any(call[0] == "launchctl" for call in runner.calls)
+
+
 @pytest.mark.parametrize(
     "configured_result_schema",
     [
@@ -461,7 +462,7 @@ def test_install_requires_configured_result_schema_to_match_crmx(
     tmp_path: Path,
     configured_result_schema: str,
 ) -> None:
-    repo, home, _crmx = setup_checkout(tmp_path)
+    repo, home, _drop = setup_checkout(tmp_path)
     watcher_config = repo / "config/funding-watcher.json"
     payload = json.loads(watcher_config.read_text())
     payload["crmResultSchemaVersion"] = configured_result_schema
@@ -476,6 +477,8 @@ def test_install_requires_configured_result_schema_to_match_crmx(
         uid=501,
     ) == 69
     assert not any(call[0] == "launchctl" for call in runner.calls)
+
+
 def test_successful_install_is_atomic_loaded_and_idempotent(
     tmp_path: Path,
 ) -> None:

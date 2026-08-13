@@ -4,10 +4,10 @@
   "downstream": {
     "repo": "NormanAI-CRMx",
     "contract": "docs/research-operating-contract.md §2 / config/crmx-compatibility.json",
-    "writer": "uv run python -m norman.tools.ingest_csv (ordinary promote) / norman.tools.funding_ingest (funding watcher)",
-    "scorer": "NormanAI-CRMx (score_batch / rescore) — never Research",
-    "funding": "norman.tools.funding_ingest + reconcile_sweep + score_batch cohort",
-    "note": "CRMx SQLite is the sole system of truth. Funding path: Research extract → CRMx SQLite → Notion projection. CSV drop remains CRMx offline fallback only."
+    "writer": "uv run python -m norman.tools.ingest_csv (ordinary promote only)",
+    "scorer": "NormanAI-CRMx / Pipeline (score_batch / rescore) — never Research",
+    "funding": "Research writes CRMx-shaped CSV to /Users/normanai/Drops/crunchbase; com.normanai.crmx.funding-drop / Pipeline owns ingest, reconcile, and score",
+    "note": "CRMx SQLite is the sole system of truth. Funding path: Research extract → CSV drop → Pipeline/CRMx ingest → score → Notion projection. Research never scores Fit and never runs reconcile_sweep --apply."
   },
   "crmx": {
     "path": "/Users/normanai/Projects/NormanAI-CRMx",
@@ -15,12 +15,14 @@
     "dbPath": "",
     "dbPathEnv": "NORMAN_CRMX_DB",
     "db": "data/norman.db",
+    "fundingDropDir": "/Users/normanai/Drops/crunchbase",
+    "fundingDropDirEnv": "NORMAN_CRMX_FUNDING_DROP",
     "ingestModule": "norman.tools.ingest_csv",
     "fundingIngestModule": "norman.tools.funding_ingest",
     "addedFromPattern": "research:{date}",
     "addedFromPrefix": "crunchbase-watcher",
     "uvBin": "uv",
-    "note": "Production Mac path is absolute /Users/normanai/Projects/NormanAI-CRMx (Research may live under ~/Documents/NormanAI-research — do not use sibling ../NormanAI-CRMx). NORMAN_CRMX_PATH overrides for CI/tests/other hosts. Ordinary promote uses ingest_csv + evidence. Funding watcher uses funding_ingest → reconcile_sweep --apply → score_batch for the run cohort. Set NORMAN_CRMX_DB (or crmx.dbPath). Fail-closed if missing."
+    "note": "Production Mac path is absolute /Users/normanai/Projects/NormanAI-CRMx (Research may live under ~/Documents/NormanAI-research — do not use sibling ../NormanAI-CRMx). NORMAN_CRMX_PATH overrides for CI/tests/other hosts. Ordinary promote uses ingest_csv + evidence. Funding watcher writes CSV to crmx.fundingDropDir (CRMx mac-paths.json crunchbase drop); Pipeline/CRMx funding-drop LaunchAgent owns ingest/score/project. Research does not call funding_ingest, score_batch, or reconcile_sweep --apply. Fleet audit 2026-08-12 revoked the auto-score exception."
   },
   "crmCore": {
     "path": "../Core CRM",

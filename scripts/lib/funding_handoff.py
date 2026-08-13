@@ -1,8 +1,12 @@
-"""Versioned bridge from Research discovery to CRMx SQLite funding ingest.
+"""Versioned bridge from Research discovery to a CRMx-shaped CSV drop.
 
-Primary path (ADR 0018): observations → Crunchbase-shaped CSV →
-``uv run python -m norman.tools.funding_ingest`` → ``reconcile_sweep --apply``
-→ narrow ``score_batch`` for the run cohort. Notion is projection only.
+Fleet audit 2026-08-12: Research discovers; Pipeline / CRMx owns SoR cooks.
+The watcher path stops after writing a Crunchbase-shaped CSV to the drop
+directory (``/Users/normanai/Drops/crunchbase``, CRMx ``mac-paths.json``).
+``com.normanai.crmx.funding-drop`` / Pipeline ingests, reconciles, and scores.
+
+This module must not invoke ``score_batch``, ``reconcile_sweep --apply``, or
+``funding_ingest``. The prior auto-score JD exception is revoked.
 
 Legacy crm-core Notion handoff remains importable for tests but is not used
 by the live watcher production dependencies.
@@ -15,7 +19,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -35,10 +38,12 @@ LEGACY_RESULT_SCHEMA_VERSION = "norman.crm_core.funding_handoff_result.v1"
 TERMINAL_STATES = {
     "created",
     "queued_existing",
+    "queued_drop",
     "duplicate_event",
     "rejected_identity",
     "ambiguous_review",
 }
+DROP_QUEUED_REASON = "crmx_csv_drop"
 ROOT = Path(__file__).resolve().parents[2]
 LINKEDIN_COMPANY_PATH = re.compile(
     r"/company/(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)(?:/about)?/?"
@@ -251,13 +256,30 @@ def validate_result(
 
 
 def write_crmx_csv(path: Path, events: Sequence[dict[str, Any]]) -> None:
-    """Write a Crunchbase-shaped CSV CRMx funding_ingest accepts."""
+    """Atomically write a Crunchbase-shaped CSV the CRMx drop watcher accepts."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CRMX_CSV_COLUMNS)
-        writer.writeheader()
-        for event in events:
-            writer.writerow(_event_to_csv_row(event))
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CRMX_CSV_COLUMNS)
+            writer.writeheader()
+            for event in events:
+                writer.writerow(_event_to_csv_row(event))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _event_to_csv_row(event: dict[str, Any]) -> dict[str, str]:
@@ -333,17 +355,20 @@ def invoke_crm_handoff(
     timeout_seconds: int = 900,
     core_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Invoke CRMx funding ingest (+ reconcile + cohort score) and validate."""
-    del core_path  # legacy kwarg retained for call-site compatibility
+    """Write the CRMx-shaped CSV drop and validate a queued-drop result.
+
+    Research stops here. Pipeline / CRMx ``com.normanai.crmx.funding-drop``
+    owns ingest, reconcile, and score. ``timeout_seconds`` and ``core_path``
+    are retained for call-site compatibility and are unused.
+    """
+    del timeout_seconds, core_path
     if not request_path.is_absolute() or not result_path.is_absolute():
         raise ValueError("handoff paths must be absolute")
     request = _load_json(request_path)
-    crmx_root, db_path, added_from_prefix = _configured_crmx()
     csv_path = request_path.with_suffix(".crmx.csv")
     write_crmx_csv(csv_path, request["events"])
     generated = _aware_datetime(str(request["generatedAt"]), "generatedAt")
     local_day = generated.astimezone(NEW_YORK).date().isoformat()
-    added_from = f"{added_from_prefix}:{local_day}"
 
     if not write:
         result = _synthesize_result(
@@ -352,7 +377,7 @@ def invoke_crm_handoff(
             events=[
                 {
                     "eventKey": event["eventKey"],
-                    "state": "created",
+                    "state": "queued_drop",
                     "reason": "crmx_dry_run_preview",
                 }
                 for event in request["events"]
@@ -361,95 +386,27 @@ def invoke_crm_handoff(
         _write_json(result_path, result)
         return validate_result(result, request=request)
 
-    pre_existing = _lookup_entities(db_path, [e.get("crunchbaseUrl") for e in request["events"]])
-    _run_uv(
-        crmx_root,
-        [
-            "python",
-            "-m",
-            "norman.tools.funding_ingest",
-            str(csv_path),
-            str(db_path),
-            "--added-from",
-            added_from,
+    drop_dir, added_from_prefix = _configured_funding_drop()
+    added_from = f"{added_from_prefix}:{local_day}"
+    drop_path = drop_dir / _drop_csv_name(str(request["runId"]), local_day)
+    _atomic_publish_bytes(csv_path.read_bytes(), drop_path)
+    result = _synthesize_result(
+        request,
+        mode="write",
+        events=[
+            {
+                "eventKey": event["eventKey"],
+                "state": "queued_drop",
+                "reason": DROP_QUEUED_REASON,
+            }
+            for event in request["events"]
         ],
-        timeout_seconds=timeout_seconds,
-        label="funding_ingest",
     )
-    _run_uv(
-        crmx_root,
-        [
-            "python",
-            "-m",
-            "norman.tools.reconcile_sweep",
-            str(db_path),
-            "--apply",
-        ],
-        timeout_seconds=timeout_seconds,
-        label="reconcile_sweep",
-    )
-    # JD wants auto-score for newly ingested cohort. score_batch --apply is
-    # attended-only under A19; funding-watcher is the explicit exception for
-    # this cohort-scoped path (narrow --added-from date tag + --all).
-    score = _run_uv(
-        crmx_root,
-        [
-            "python",
-            "-m",
-            "norman.tools.score_batch",
-            str(db_path),
-            "--added-from",
-            added_from,
-            "--all",
-            "--apply",
-        ],
-        timeout_seconds=timeout_seconds,
-        label="score_batch",
-        allow_failure=True,
-    )
-    post_existing = _lookup_entities(
-        db_path, [e.get("crunchbaseUrl") for e in request["events"]]
-    )
-    result_events: list[dict[str, Any]] = []
-    for event in request["events"]:
-        url = str(event.get("crunchbaseUrl") or "")
-        entity_id = post_existing.get(url.casefold())
-        was = pre_existing.get(url.casefold())
-        if entity_id and was:
-            result_events.append(
-                {
-                    "eventKey": event["eventKey"],
-                    "state": "queued_existing",
-                    "reason": "crunchbase_url",
-                    "pageId": entity_id,
-                }
-            )
-        elif entity_id:
-            result_events.append(
-                {
-                    "eventKey": event["eventKey"],
-                    "state": "created",
-                    "reason": "crmx_sqlite_ingest",
-                    "pageId": entity_id,
-                }
-            )
-        else:
-            result_events.append(
-                {
-                    "eventKey": event["eventKey"],
-                    "state": "rejected_identity",
-                    "reason": "crmx_ingest_no_entity",
-                }
-            )
-    result = _synthesize_result(request, mode="write", events=result_events)
     result_meta = {
         "addedFrom": added_from,
+        "boundary": "research_stops_at_csv_drop",
         "csvPath": str(csv_path),
-        "scoreBatch": {
-            "ok": score.returncode == 0,
-            "stdout": (score.stdout or "")[-2000:],
-            "stderr": (score.stderr or "")[-1000:],
-        },
+        "dropPath": str(drop_path),
     }
     _write_json(result_path, result)
     meta_path = result_path.with_suffix(".crmx-meta.json")
@@ -525,35 +482,59 @@ def _synthesize_result(
     }
 
 
-def _configured_crmx() -> tuple[Path, Path, str]:
-    from lib.config import DEFAULT_CRMX_PATH, crmx_path
+def _configured_funding_drop() -> tuple[Path, str]:
+    from lib.config import DEFAULT_FUNDING_DROP_DIR, funding_drop_dir
 
-    override_db = os.environ.get("NORMAN_CRMX_DB")
+    drop = funding_drop_dir()
+    if not drop.is_absolute():
+        raise RuntimeError(
+            "NORMAN_CRMX_FUNDING_DROP / crmx.fundingDropDir must be absolute "
+            f"(production default: {DEFAULT_FUNDING_DROP_DIR})"
+        )
     config = _load_json(ROOT / "config" / "research.json")
     block = config.get("crmx") or {}
-    # NORMAN_CRMX_PATH wins; else absolute Mac Projects default (not Documents sibling).
-    root = crmx_path()
-    if not root.is_absolute():
-        raise RuntimeError(
-            "NORMAN_CRMX_PATH / crmx.path must be absolute "
-            f"(production default: {DEFAULT_CRMX_PATH})"
-        )
-    root = root.resolve()
-    if override_db:
-        db = Path(override_db).expanduser().resolve()
-    else:
-        rel = block.get("db") or "data/norman.db"
-        db = Path(rel).expanduser()
-        if not db.is_absolute():
-            db = (root / db).resolve()
     prefix = block.get("addedFromPrefix") or "crunchbase-watcher"
     if not isinstance(prefix, str) or not prefix.strip():
         raise RuntimeError("crmx.addedFromPrefix is invalid")
-    if not root.is_dir():
-        raise RuntimeError(f"CRMx checkout missing: {root}")
-    if not db.is_file():
-        raise RuntimeError(f"CRMx SQLite missing: {db}")
-    return root, db, prefix.strip()
+    return drop.resolve(), prefix.strip()
+
+
+def _drop_csv_name(run_id: str, local_day: str) -> str:
+    if (
+        not run_id
+        or run_id in {".", ".."}
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise ValueError("runId is not a safe drop filename")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", local_day):
+        raise ValueError("local day must be YYYY-MM-DD")
+    return f"crunchbase-watcher-{local_day}-{run_id}.csv"
+
+
+def _atomic_publish_bytes(payload: bytes, path: Path) -> None:
+    """Publish bytes to path; refuse overwrite so a drop is never rewritten."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary_path, path)
+        temporary_path.unlink()
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _configured_core_path() -> Path:
@@ -568,62 +549,6 @@ def _configured_core_path() -> Path:
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError("crmCore.path is not configured")
     return ROOT / value
-
-
-def _run_uv(
-    crmx_root: Path,
-    args: list[str],
-    *,
-    timeout_seconds: int,
-    label: str,
-    allow_failure: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    command = ["uv", "run", *args]
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=str(crmx_root),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("uv is required for CRMx funding handoff") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"CRMx {label} retryable timeout") from exc
-    if completed.returncode and not allow_failure:
-        detail = (completed.stderr or completed.stdout or "")[:500]
-        raise RuntimeError(f"CRMx {label} exit {completed.returncode}: {detail}")
-    return completed
-
-
-def _lookup_entities(db_path: Path, urls: Sequence[Any]) -> dict[str, str]:
-    wanted = {
-        str(url).strip().casefold()
-        for url in urls
-        if isinstance(url, str) and url.strip()
-    }
-    if not wanted:
-        return {}
-    # Open via a normal filesystem path. URI mode (file:...?mode=ro) fails in
-    # some Mac runner/sandbox environments with OperationalError even when the
-    # same file opens fine with a plain path (and CRMx funding_ingest uses that).
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("PRAGMA query_only=ON")
-        rows = conn.execute(
-            "SELECT entity_id, crunchbase_url FROM companies "
-            "WHERE crunchbase_url IS NOT NULL AND trim(crunchbase_url) != ''"
-        ).fetchall()
-    finally:
-        conn.close()
-    found: dict[str, str] = {}
-    for entity_id, url in rows:
-        key = str(url).strip().casefold()
-        if key in wanted:
-            found[key] = str(entity_id)
-    return found
 
 
 def _canonical_request_bytes(payload: dict[str, Any]) -> bytes:

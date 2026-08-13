@@ -15,7 +15,7 @@ Companion migration notes: `docs/crmx-handoff-migration.md` and
 
 ```text
 ordinary research → CRMx CSV + evidence JSON → norman.tools.ingest_csv ──┐
-strict CB watcher → typed JSON v1 → CSV+evidence → ingest_csv (*) ───────┤
+strict CB watcher → typed JSON v1 → CSV drop → Pipeline/CRMx ingest ─────┤
                                                                           ↓
                                                          NormanAI-CRMx SoR
                                                                           ↓
@@ -23,8 +23,9 @@ strict CB watcher → typed JSON v1 → CSV+evidence → ingest_csv (*) ──�
 ```
 
 `(*)` Funding watcher keeps typed `funding_handoff.v1` for ledger/audit, then
-adapts to CRMx `ingest_csv` + evidence. Legacy `crm_funding_handoff.py` is
-explicit-only (`--handoff-legacy-crm-core`).
+writes a Crunchbase-shaped CSV to `/Users/normanai/Drops/crunchbase` and stops.
+Pipeline / CRMx owns ingest, score, and project. Legacy `crm_funding_handoff.py`
+is explicit-only (`--handoff-legacy-crm-core`).
 
 Research is upstream of CRMx. Ordinary candidates use the Crunchbase-shaped CSV
 plus a versioned evidence sidecar. Research has no Notion mutation client and no
@@ -37,8 +38,9 @@ handoffs:
 
 1. **Ordinary promote** — CRMx CSV → `uv run python -m norman.tools.ingest_csv`
    (plus evidence sidecar `norman.research.crmx_evidence.v1`).
-2. **Strict funding watcher** — typed JSON → same CRMx `ingest_csv` + evidence
-   adapter (no typed CRMx funding CLI verified; do not invent Notion).
+2. **Strict funding watcher** — typed JSON → Crunchbase-shaped CSV drop at
+   `/Users/normanai/Drops/crunchbase`. Research does not ingest, score, or
+   reconcile.
 
 Neither handoff makes Research a writer or grants it Notion property authority:
 
@@ -190,9 +192,10 @@ The only allowlisted source is:
 `https://www.crunchbase.com/discover/saved/main-funding-august-2026/730c458b-149c-4a0a-9684-7146e7258993`
 
 Research owns source validation, browser reading, the event-key ledger,
-immutable receipts, scheduling, and retry. Mutation goes through CRMx SQLite
-(`funding_ingest` → `reconcile_sweep` → narrow `score_batch`) via
-`NORMAN_CRMX_PATH` / `NORMAN_CRMX_DB` (fail-closed). Checks run weekdays at
+immutable receipts, scheduling, and retry. Mutation of the SoR is Pipeline /
+CRMx work after the CSV lands in `/Users/normanai/Drops/crunchbase`
+(`NORMAN_CRMX_FUNDING_DROP` overrides). Research does not call `funding_ingest`,
+`reconcile_sweep --apply`, or `score_batch`. Checks run weekdays at
 09/12/15/18 ET and hand off only companies funded today (America/New_York).
 Research never dual-writes Notion MACHINE fields. The event key hashes the
 exact source URL, canonical Crunchbase organization URL, funding date,

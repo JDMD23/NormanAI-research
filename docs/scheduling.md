@@ -9,10 +9,11 @@ Live Mac LaunchAgent: `com.normanai.research.crunchbase-funding-watcher`
 |---:|---|
 | 09:00, 12:00, 15:00, 18:00 ET (Mon–Fri) | `python3 scripts/funding_watcher.py check --write --yes --enforce-schedule` |
 
-Selection: last funding date **= today (ET)**. Handoff: temp CSV → CRMx
-`funding_ingest` (SQLite SoR, `added_from=crunchbase-watcher:YYYY-MM-DD`) →
-`reconcile_sweep --apply` → narrow cohort `score_batch --apply`. Research does
-not dual-write Notion. CSV drop LaunchAgent remains fallback only.
+Selection: last funding date **= today (ET)**. Handoff: Crunchbase-shaped CSV
+to `/Users/normanai/Drops/crunchbase` (`crunchbase-watcher-YYYY-MM-DD-<runId>.csv`).
+**Research stops at the CSV.** Pipeline / CRMx LaunchAgent
+`com.normanai.crmx.funding-drop` owns `funding_ingest`, `reconcile_sweep --apply`,
+and score. Research does not dual-write Notion and does not score Fit.
 
 Each scheduled source may reserve at most three pages. All Crunchbase work
 shares one 55-work-item ledger per New York day (15 Research saved-list page
@@ -34,18 +35,20 @@ The exact durable artifacts are:
 
 - `ledger.json` — event lifecycle and completed slots
 - `receipts/<runId>.json` — immutable detector receipt
-- `handoffs/<runId>.request.json` — typed request for CRMx ingest
-- `handoffs/<runId>.crmx.csv` — Crunchbase-shaped CSV fed to funding_ingest
-- `handoffs/<runId>.result.json` — durable CRMx result (entity ids in pageId)
+- `handoffs/<runId>.request.json` — typed request for the CSV drop
+- `handoffs/<runId>.crmx.csv` — Crunchbase-shaped CSV (Research copy)
+- `handoffs/<runId>.result.json` — durable `queued_drop` result
+- live drop: `/Users/normanai/Drops/crunchbase/crunchbase-watcher-<date>-<runId>.csv`
 - `latest.json` — replaceable summary of the latest run
 - `migration-receipt.json` — proof of the read-only legacy import
 
 An event moves `observed → handoff_pending → terminal` only after a validated
-CRMx result is durable. `retryable` remains nonterminal and is eligible for a
-later handoff. Terminal results are `created`, `queued_existing`,
-`duplicate_event`, `rejected_identity`, or `ambiguous_review`. Default path:
-`funding_ingest` → `reconcile_sweep` → narrow `score_batch`. Legacy crm-core
-requires `--handoff-legacy-crm-core`.
+CSV-drop result is durable. `retryable` remains nonterminal and is eligible for a
+later handoff. Terminal funding-watcher results are `queued_drop` (CSV landed
+in the drop). Legacy Core results `created`, `queued_existing`,
+`duplicate_event`, `rejected_identity`, or `ambiguous_review` remain valid for
+the explicit `--handoff-legacy-crm-core` path. Default path: CSV drop only.
+Pipeline/CRMx owns ingest/score/project.
 
 Watcher exit `0` covers clean completion, no change, disabled, outside
 schedule, and already-checked/bootstrap-complete runs. Exit `75` means retry
@@ -60,8 +63,9 @@ The generic Crunchbase source is disabled. Broader Research browser work is
 offset to **07:15 and 14:15** so it does not collide with the strict watcher.
 
 The live LaunchAgent points at the permanent Documents Research checkout and
-requires a permanent CRMx checkout + `data/norman.db` + `uv`. Do not reload
-retired plists or `com.normanai.scheduler`. Do not dual-write Notion from
+requires the CRMx funding drop directory (`/Users/normanai/Drops/crunchbase`).
+Do not reload retired plists or `com.normanai.scheduler`. Do not dual-write
+Notion from Research. Do not score Fit or run `reconcile_sweep --apply` from
 Research.
 
 ## Broader daily discovery

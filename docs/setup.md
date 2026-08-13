@@ -74,9 +74,9 @@ filters, incomplete pages, or result-count drift.
 Before the first supervised run:
 
 ```bash
-# Optional override; config/research.json crmx.path already defaults to this.
-export NORMAN_CRMX_PATH=/Users/normanai/Projects/NormanAI-CRMx
-export NORMAN_CRMX_DB=/absolute/path/to/norman.sqlite
+# Optional override; config/research.json crmx.fundingDropDir already defaults
+# to /Users/normanai/Drops/crunchbase (CRMx mac-paths.json).
+export NORMAN_CRMX_FUNDING_DROP=/Users/normanai/Drops/crunchbase
 python3 scripts/funding_watcher.py migrate-legacy-state
 python3 scripts/funding_watcher.py check --dry-run
 python3 scripts/funding_watcher.py check --write --yes
@@ -84,14 +84,15 @@ python3 scripts/funding_watcher.py check --write --yes
 
 Migration copies the preserved 189-event Core ledger without changing it. The
 first command is idempotent and refuses any count, source, schema, or key
-mismatch. Default handoff targets CRMx `funding_ingest` → `reconcile_sweep` →
-narrow `score_batch` with `--added-from crunchbase-watcher:<date>`.
+mismatch. Default handoff writes a Crunchbase-shaped CSV to the drop and
+stops. Pipeline / CRMx `com.normanai.crmx.funding-drop` owns ingest, reconcile,
+and score. Research does not call `score_batch` or `reconcile_sweep --apply`.
 
 After Research and CRMx are merged into permanent checkouts and acceptance is
 clean, activate the Codex automation `research-crunchbase-funding-watcher` for
 09:00, 12:00, 15:00, and 18:00 New York time on weekdays. It must run only the
 guarded `check --write --yes --enforce-schedule` command and must verify the
-CRMx checkout + DB before browser work. The legacy LaunchAgent remains
+CSV drop directory before browser work. The legacy LaunchAgent remains
 uninstalled so there is exactly one scheduler. Mac live Research may live under
 `~/Documents/NormanAI-research` while CRMx stays at
 `/Users/normanai/Projects/NormanAI-CRMx` — do not assume a Documents sibling.

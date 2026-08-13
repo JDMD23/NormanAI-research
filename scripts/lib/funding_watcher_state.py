@@ -26,6 +26,7 @@ TERMINAL_OUTCOMES = {
     "baseline",
     "created",
     "queued_existing",
+    "queued_drop",
     "duplicate_event",
     "rejected_identity",
     "ambiguous_review",

@@ -507,6 +507,30 @@ def test_live_check_records_pending_before_core_and_terminal_after(
     assert deps.ledger.is_terminal(event_key)
 
 
+def test_live_check_accepts_queued_drop_csv_handoff(tmp_path: Path) -> None:
+    row = observation()
+    event_key = funding_event_key(row)
+
+    def invoke(request: dict, write: bool):
+        result = core_result(request, write=write)
+        result["events"][0] = {
+            "eventKey": request["events"][0]["eventKey"],
+            "state": "queued_drop",
+            "reason": "crmx_csv_drop",
+        }
+        return result
+
+    deps = dependencies(tmp_path, FakeBrowser([row]), invoke=invoke)
+    receipt = run_check(
+        config(tmp_path), deps, write=True, now=NOW, enforce_schedule=False
+    )
+    assert receipt["status"] == "complete"
+    assert receipt["events"][0]["state"] == "queued_drop"
+    assert deps.ledger.is_terminal(event_key)
+    assert deps.ledger.events[event_key]["outcome"] == "queued_drop"
+    assert deps.ledger.events[event_key]["pageId"] is None
+
+
 def test_core_retry_leaves_event_retryable(tmp_path: Path) -> None:
     row = observation()
 
@@ -625,6 +649,7 @@ def test_bootstrap_policy_exclusions_count_toward_coverage(
     assert receipt["counts"] == {
         "created": 10,
         "queued_existing": 0,
+        "queued_drop": 0,
         "baselined": 2,
         "already_terminal": 0,
     }
@@ -649,6 +674,7 @@ def test_bootstrap_handoffs_top_ten_then_baselines_remainder(
     assert receipt["counts"] == {
         "created": 10,
         "queued_existing": 0,
+        "queued_drop": 0,
         "baselined": 179,
         "already_terminal": 0,
     }

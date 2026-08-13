@@ -208,34 +208,19 @@ def _prerequisites(
             return False, "Research funding result schemaVersion does not match CRMx handoff"
         crmx_config = research_config.get("crmx")
         if not isinstance(crmx_config, dict):
-            return False, "permanent CRMx path is not configured"
-        env_name = crmx_config.get("pathEnv") or "NORMAN_CRMX_PATH"
-        if not isinstance(env_name, str) or not env_name.strip():
-            env_name = "NORMAN_CRMX_PATH"
-        crmx_value = os.environ.get(env_name) or crmx_config.get("path")
-        if not isinstance(crmx_value, str) or not crmx_value.strip():
-            return False, "permanent CRMx path is not configured"
-        crmx_root = Path(crmx_value).expanduser()
-        if not crmx_root.is_absolute():
-            crmx_root = (root / crmx_root).resolve()
-        else:
-            crmx_root = crmx_root.resolve()
-        if not _permanent(crmx_root):
-            return False, "activation requires a permanent CRMx checkout"
-        db_rel = crmx_config.get("db") or "data/norman.db"
-        if not isinstance(db_rel, str) or not db_rel.strip():
-            return False, "CRMx db path is invalid"
-        db_path = Path(db_rel).expanduser()
-        if not db_path.is_absolute():
-            db_path = (crmx_root / db_path).resolve()
-        if not db_path.is_file():
-            return False, f"CRMx SQLite missing: {db_path}"
-        ingest_mod = crmx_root / "src/norman/tools/funding_ingest.py"
-        if not ingest_mod.is_file():
-            return False, "CRMx funding_ingest module is missing"
-        uv_check = _run(runner, ["uv", "--version"])
-        if uv_check.returncode:
-            return False, "uv is required for CRMx funding handoff"
+            return False, "CRMx funding drop directory is not configured"
+        drop_env = crmx_config.get("fundingDropDirEnv") or "NORMAN_CRMX_FUNDING_DROP"
+        if not isinstance(drop_env, str) or not drop_env.strip():
+            drop_env = "NORMAN_CRMX_FUNDING_DROP"
+        drop_value = os.environ.get(drop_env) or crmx_config.get("fundingDropDir")
+        if not isinstance(drop_value, str) or not drop_value.strip():
+            return False, "CRMx funding drop directory is not configured"
+        drop_path = Path(drop_value).expanduser()
+        if not drop_path.is_absolute():
+            return False, "CRMx funding drop directory must be absolute"
+        drop_path = drop_path.resolve()
+        if not drop_path.is_dir():
+            return False, f"CRMx funding drop directory missing: {drop_path}"
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return False, str(exc)
     return True, ""
